@@ -59,20 +59,16 @@ $scalePicker = fn() => Picker('规模', selection: $scaleBinding)(
     Text('100万根 SoA')->tag('1m'),
 )->pickerStyle(PickerStyle::segmented);
 
-// ViewThatFits: 1 row on wide desktop, 2 clean rows on iPadOS / Android Pad / narrow windows!
-$scopeBar = fn() => ViewThatFits()(
-    VStack(alignment: HorizontalAlignment::leading, spacing: 10)(
-        HStack(alignment: VerticalAlignment::center, spacing: 12)(
-            $marketPicker(),
-            $symbolPicker(),
-            Spacer(),
-            $scalePicker(),
-            $intervalPicker(),
-        ),
+$scopeBar = fn() => VStack(alignment: HorizontalAlignment::leading, spacing: 10)(
+    HStack(alignment: VerticalAlignment::center, spacing: 12)(
+        $marketPicker(),
+        Spacer(),
+        $scalePicker(),
     ),
-    VStack(alignment: HorizontalAlignment::leading, spacing: 8)(
-        HStack(alignment: VerticalAlignment::center, spacing: 10)($marketPicker(), Spacer(), $scalePicker()),
-        HStack(alignment: VerticalAlignment::center, spacing: 10)($symbolPicker(), Spacer(), $intervalPicker()),
+    HStack(alignment: VerticalAlignment::center, spacing: 12)(
+        $symbolPicker(),
+        Spacer(),
+        $intervalPicker(),
     ),
 );
 
