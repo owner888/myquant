@@ -1,0 +1,64 @@
+{
+    "_readme": [
+        "This file locks the dependencies of your project to a known state",
+        "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
+        "This file is @generated automatically"
+    ],
+    "content-hash": "b3a034878d8b952fe6d8350a0c9dc690",
+    "packages": [
+        {
+            "name": "owner888/myphp",
+            "version": "v1.203.13",
+            "source": {
+                "type": "git",
+                "url": "https://github.com/owner888/myphp.git",
+                "reference": "2706efca205c4b7e97922d89e7638a0eaad2c906"
+            },
+            "dist": {
+                "type": "zip",
+                "url": "https://api.github.com/repos/owner888/myphp/zipball/2706efca205c4b7e97922d89e7638a0eaad2c906",
+                "reference": "2706efca205c4b7e97922d89e7638a0eaad2c906",
+                "shasum": ""
+            },
+            "require": {
+                "ext-ffi": "*",
+                "php": ">=8.4"
+            },
+            "bin": [
+                "bin/myphp"
+            ],
+            "type": "library",
+            "autoload": {
+                "files": [
+                    "src/UI/Declarative/functions.php"
+                ],
+                "psr-4": {
+                    "MyPHP\\": "src/"
+                }
+            },
+            "notification-url": "https://packagist.org/downloads/",
+            "license": [
+                "MIT"
+            ],
+            "description": "Desktop apps in PHP, with native UI or a web frontend, over ext-ffi.",
+            "support": {
+                "issues": "https://github.com/owner888/myphp/issues",
+                "source": "https://github.com/owner888/myphp/tree/v1.203.13"
+            },
+            "time": "2026-11-23T06:55:40+00:00",
+            "published-time": "2026-11-23T06:55:55+00:00"
+        }
+    ],
+    "packages-dev": [],
+    "aliases": [],
+    "minimum-stability": "stable",
+    "stability-flags": {},
+    "prefer-stable": false,
+    "prefer-lowest": false,
+    "platform": {
+        "php": ">=8.4",
+        "ext-ffi": "*"
+    },
+    "platform-dev": {},
+    "plugin-api-version": "2.11.0"
+}

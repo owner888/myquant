@@ -1,0 +1,21 @@
+{
+    "name": "MyQuant",
+    "displayName": "MyQuant — 跨市场量化工作台",
+    "identifier": "com.owner888.myquant",
+    "version": "0.1.0",
+    "entry": "app.php",
+    "out": "build",
+    "exclude": [
+        "native",
+        "scripts"
+    ],
+    "ffigen": [
+        {
+            "header": "native/quant_sweep.h",
+            "class": "QuantSweepFfi",
+            "namespace": "MyQuant\\Native",
+            "lib": "quant_sweep",
+            "out": "src/Native/QuantSweepFfi.php"
+        }
+    ]
+}
