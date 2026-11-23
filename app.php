@@ -9,6 +9,9 @@ require __DIR__ . '/boot.php';
 
 App::setName('MyQuant');
 $state = new QuantState();
+if (($initScale = getenv('MYQUANT_SCALE')) && is_string($initScale)) {
+    $state->selectScaleMode($initScale);
+}
 if (($initTab = getenv('MYQUANT_TAB')) && is_string($initTab)) {
     $state->tab = $initTab;
 }

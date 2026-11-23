@@ -1,11 +1,13 @@
 <?php
-// SwiftUI-standard declarative UI for MyQuant ($this is MyQuant\QuantState). Hot-reloads on save.
+// SwiftUI-standard declarative UI for MyQuant ($this is MyQuant\QuantState).
+// Adapts seamlessly across macOS, Windows, Linux, iPadOS, Android Pad, and iPhone.
 declare(strict_types=1);
 
 use MyQuant\Data\MarketFeed;
 
 $accent = Color::rgb(0x10B981);
 $green = Color::rgb(0x10B981);
+$cyan = Color::rgb(0x38BDF8);
 $amber = Color::rgb(0xF59E0B);
 $red = Color::rgb(0xEF4444);
 
@@ -33,19 +35,45 @@ $intervalBinding = new Binding(
     get: fn() => $this->interval,
     set: fn(string $iv) => $this->selectInterval($iv),
 );
+$scaleBinding = new Binding(
+    get: fn() => $this->scaleMode,
+    set: fn(string $sm) => $this->selectScaleMode($sm),
+);
 
-$scopeBar = fn() => HStack(alignment: VerticalAlignment::center, spacing: 14)(
-    Picker('市场', selection: $marketBinding)(
-        Text('黄金外汇 · Exness')->tag('forex'),
-        Text('加密市场 · Binance')->tag('crypto'),
-    )->pickerStyle(PickerStyle::segmented),
-    Picker('品种', selection: $symbolBinding)(
-        Each($this->currentSymbols())(fn(string $sym) => Text(verbatim: $sym)->tag($sym))
-    )->pickerStyle(PickerStyle::segmented),
-    Spacer(),
-    Picker('周期', selection: $intervalBinding)(
-        Each(MarketFeed::INTERVALS)(fn(string $iv) => Text(verbatim: $iv)->tag($iv))
-    )->pickerStyle(PickerStyle::segmented),
+$marketPicker = fn() => Picker('市场', selection: $marketBinding)(
+    Text('黄金外汇 · Exness')->tag('forex'),
+    Text('加密市场 · Binance')->tag('crypto'),
+)->pickerStyle(PickerStyle::segmented);
+
+$symbolPicker = fn() => Picker('品种', selection: $symbolBinding)(
+    Each($this->currentSymbols())(fn(string $sym) => Text(verbatim: $sym)->tag($sym))
+)->pickerStyle(PickerStyle::segmented);
+
+$intervalPicker = fn() => Picker('周期', selection: $intervalBinding)(
+    Each(MarketFeed::INTERVALS)(fn(string $iv) => Text(verbatim: $iv)->tag($iv))
+)->pickerStyle(PickerStyle::segmented);
+
+$scalePicker = fn() => Picker('规模', selection: $scaleBinding)(
+    Text('标准行情')->tag('live'),
+    Text('10万根 SoA')->tag('100k'),
+    Text('100万根 SoA')->tag('1m'),
+)->pickerStyle(PickerStyle::segmented);
+
+// ViewThatFits: 1 row on wide desktop, 2 clean rows on iPadOS / Android Pad / narrow windows!
+$scopeBar = fn() => ViewThatFits()(
+    VStack(alignment: HorizontalAlignment::leading, spacing: 10)(
+        HStack(alignment: VerticalAlignment::center, spacing: 12)(
+            $marketPicker(),
+            $symbolPicker(),
+            Spacer(),
+            $scalePicker(),
+            $intervalPicker(),
+        ),
+    ),
+    VStack(alignment: HorizontalAlignment::leading, spacing: 8)(
+        HStack(alignment: VerticalAlignment::center, spacing: 10)($marketPicker(), Spacer(), $scalePicker()),
+        HStack(alignment: VerticalAlignment::center, spacing: 10)($symbolPicker(), Spacer(), $intervalPicker()),
+    ),
 );
 
 $syncToolbar = fn() => [
@@ -56,8 +84,9 @@ $syncToolbar = fn() => [
     )->disabled($this->syncing),
 ];
 
-$labPage = function () use ($card, $metricTile, $scopeBar, $syncToolbar, $accent, $green, $amber, $red): View {
+$labPage = function () use ($card, $metricTile, $scopeBar, $syncToolbar, $accent, $green, $cyan, $amber, $red): View {
     $r = $this->report;
+    $lod = $this->lodView;
     $ret = (float)($r['netReturnPct'] ?? 0.0);
     $bh = (float)($r['buyHoldReturnPct'] ?? 0.0);
     $pf = (float)($r['profitFactor'] ?? 0.0);
@@ -67,6 +96,11 @@ $labPage = function () use ($card, $metricTile, $scopeBar, $syncToolbar, $accent
     $wr = (float)($r['winRatePct'] ?? 0.0);
     $trades = (int)($r['closedTrades'] ?? 0);
     $fees = (float)($r['totalFeesQuote'] ?? 0.0);
+    $btMs = (float)($r['elapsedMs'] ?? 0.0);
+
+    $lodLow = (float)($lod['low'] ?? 0.0);
+    $lodHigh = (float)($lod['high'] ?? 1.0);
+    $lodPad = max(0.0001, ($lodHigh - $lodLow) * 0.06);
 
     return ScrollView(Axis::vertical)(
         VStack(alignment: HorizontalAlignment::leading, spacing: 14)(
@@ -76,7 +110,7 @@ $labPage = function () use ($card, $metricTile, $scopeBar, $syncToolbar, $accent
                 $metricTile(
                     '策略净收益 (扣摩擦)',
                     sprintf('%+.2f%%', $ret),
-                    sprintf('买死不动 B&H: %+.2f%% · 终值 $%.0f', $bh, (float)($r['finalEquity'] ?? 10000.0)),
+                    sprintf('买死不动 B&H: %+.2f%% · 回测 %.2f ms', $bh, $btMs),
                     $ret >= 0 ? $green : $red,
                 ),
                 $metricTile(
@@ -94,8 +128,42 @@ $labPage = function () use ($card, $metricTile, $scopeBar, $syncToolbar, $accent
                 $metricTile(
                     '单笔期望 (R) / 交易样本',
                     sprintf('%+.2f R', $expR),
-                    sprintf('胜率 %.1f%% · %d 笔 · 累计摩擦 $%.1f', $wr, $trades, $fees),
+                    sprintf('胜率 %.1f%% · %s 笔 · 摩擦 $%.0f', $wr, number_format($trades), $fees),
                     $expR > 0 ? $green : $red,
+                ),
+            ),
+            $card(
+                HStack(alignment: VerticalAlignment::firstTextBaseline)(
+                    Text(verbatim: sprintf('C 原生 LOD 金字塔行情视野 (%s 根 K 线)', number_format($this->barCount)))->font(Font::headline),
+                    Spacer(),
+                    Text(verbatim: sprintf(
+                        'O(log N) 极值 [%.2f .. %.2f] · %d 桶 · 查询 %.1f µs · C %.1f MB / PHP %.1f MB',
+                        $lodLow,
+                        $lodHigh,
+                        (int)($lod['buckets'] ?? 0),
+                        (float)($lod['elapsedUs'] ?? 0.0),
+                        $this->cMemoryMb,
+                        $this->phpMemoryMb,
+                    ))->font(Font::caption)->foregroundStyle(Color::secondary),
+                ),
+                Chart()(
+                    LinePlot(x: $lod['xs'] ?? [0.0, 1.0], y: $lod['closes'] ?? [1.0, 1.0])
+                        ->foregroundStyle($cyan),
+                )
+                    ->chartYScale(domain: [$lodLow - $lodPad, $lodHigh + $lodPad])
+                    ->chartYAxis(new AxisMarks(desiredCount: 4, format: fn(float $v) => $v >= 100 ? sprintf('%.0f', $v) : sprintf('%.3f', $v)))
+                    ->frame(height: 155),
+                LazyVGrid(columns: [GridItem::adaptive(minimum: 260)], spacing: 16)(
+                    VStack(alignment: HorizontalAlignment::leading, spacing: 4)(
+                        Text(verbatim: sprintf('视野起点偏移: %.1f%%', $this->viewStartPct))->font(Font::caption)->foregroundStyle(Color::secondary),
+                        Slider(value: $this->viewStartPct, in: [0.0, 99.0], step: 0.5, onEditingChanged: fn(bool $e) => !$e && $this->updateViewport())
+                            ->onChange(of: $this->viewStartPct, action: fn() => $this->updateViewport()),
+                    ),
+                    VStack(alignment: HorizontalAlignment::leading, spacing: 4)(
+                        Text(verbatim: sprintf('视野缩放跨度: %.1f%% (%s 根可见)', $this->viewSpanPct, number_format((int)round($this->barCount * $this->viewSpanPct / 100.0))))->font(Font::caption)->foregroundStyle(Color::secondary),
+                        Slider(value: $this->viewSpanPct, in: [1.0, 100.0], step: 0.5, onEditingChanged: fn(bool $e) => !$e && $this->updateViewport())
+                            ->onChange(of: $this->viewSpanPct, action: fn() => $this->updateViewport()),
+                    ),
                 ),
             ),
             $card(
@@ -113,7 +181,7 @@ $labPage = function () use ($card, $metricTile, $scopeBar, $syncToolbar, $accent
                 )
                     ->chartYScale(domain: [(float)($r['yMin'] ?? 9500.0), (float)($r['yMax'] ?? 10500.0)])
                     ->chartYAxis(new AxisMarks(desiredCount: 5, format: fn(float $v) => sprintf('$%.0f', $v)))
-                    ->frame(height: 205),
+                    ->frame(height: 195),
                 Divider(),
                 Text('水下回撤曲线 (Underwater Drawdown %)')->font(Font::subheadline)->foregroundStyle(Color::secondary),
                 Chart()(
@@ -122,33 +190,31 @@ $labPage = function () use ($card, $metricTile, $scopeBar, $syncToolbar, $accent
                 )
                     ->chartYScale(domain: [(float)($r['ddMin'] ?? -10.0), 0.5])
                     ->chartYAxis(new AxisMarks(desiredCount: 4, format: fn(float $v) => sprintf('%.1f%%', $v)))
-                    ->frame(height: 95),
+                    ->frame(height: 90),
             ),
             $card(
                 Text('正交策略参数与「以损定量」风控调节')->font(Font::headline),
-                HStack(spacing: 18)(
+                LazyVGrid(columns: [GridItem::adaptive(minimum: 240)], spacing: 16)(
                     VStack(alignment: HorizontalAlignment::leading, spacing: 6)(
                         Text(verbatim: sprintf('快线 EMA 周期: %.0f', $this->fastEma))->font(Font::caption)->foregroundStyle(Color::secondary),
                         Slider(value: $this->fastEma, in: [4.0, 35.0], step: 1.0, onEditingChanged: fn(bool $e) => !$e && $this->runBacktest()),
-                    )->frame(maxWidth: INF),
+                    ),
                     VStack(alignment: HorizontalAlignment::leading, spacing: 6)(
                         Text(verbatim: sprintf('慢线 EMA 周期: %.0f', $this->slowEma))->font(Font::caption)->foregroundStyle(Color::secondary),
                         Slider(value: $this->slowEma, in: [15.0, 120.0], step: 1.0, onEditingChanged: fn(bool $e) => !$e && $this->runBacktest()),
-                    )->frame(maxWidth: INF),
+                    ),
                     VStack(alignment: HorizontalAlignment::leading, spacing: 6)(
                         Text(verbatim: sprintf('ATR 硬止损倍数: %.1f x', $this->atrMult))->font(Font::caption)->foregroundStyle(Color::secondary),
                         Slider(value: $this->atrMult, in: [1.0, 4.0], step: 0.25, onEditingChanged: fn(bool $e) => !$e && $this->runBacktest()),
-                    )->frame(maxWidth: INF),
-                ),
-                HStack(spacing: 18)(
+                    ),
                     VStack(alignment: HorizontalAlignment::leading, spacing: 6)(
                         Text(verbatim: sprintf('单笔最大允许亏损 (以损定量): %.1f%%', $this->riskPct))->font(Font::caption)->foregroundStyle(Color::secondary),
                         Slider(value: $this->riskPct, in: [0.25, 3.0], step: 0.25, onEditingChanged: fn(bool $e) => !$e && $this->recomputeAll()),
-                    )->frame(maxWidth: INF),
+                    ),
                     VStack(alignment: HorizontalAlignment::leading, spacing: 6)(
                         Text(verbatim: sprintf('单边交易摩擦 (手续费+滑点): %.1f bps (%.3f%%)', $this->feeBps, $this->feeBps * 0.01))->font(Font::caption)->foregroundStyle(Color::secondary),
                         Slider(value: $this->feeBps, in: [0.0, 15.0], step: 0.2, onEditingChanged: fn(bool $e) => !$e && $this->recomputeAll()),
-                    )->frame(maxWidth: INF),
+                    ),
                 ),
                 Divider(),
                 HStack(alignment: VerticalAlignment::center, spacing: 10)(
@@ -166,21 +232,22 @@ $sweepPage = function () use ($card, $metricTile, $scopeBar, $syncToolbar, $gree
     $sw = $this->sweep;
     $usedC = (bool)($sw['usedNativeC'] ?? false);
     $rows = $sw['rows'] ?? [];
+    $totalEvalBars = $this->barCount * (int)($sw['totalCombos'] ?? 0);
 
     return ScrollView(Axis::vertical)(
         VStack(alignment: HorizontalAlignment::leading, spacing: 14)(
             $scopeBar(),
             LazyVGrid(columns: [GridItem::adaptive(minimum: 220)], spacing: 12)(
                 $metricTile(
-                    'FFI 计算引擎',
-                    $usedC ? 'Native C (FFI)' : 'PHP Fallback',
+                    'SoA 多核并行引擎',
+                    $usedC ? 'C SoA + Pthreads' : 'PHP Fallback',
                     sprintf('%s · 耗时 %.2f ms', (string)($sw['libraryPath'] ?? ''), (float)($sw['elapsedMs'] ?? 0.0)),
                     $usedC ? $green : $amber,
                 ),
                 $metricTile(
-                    '参数网格总组合数',
-                    sprintf('%d 组', (int)($sw['totalCombos'] ?? 0)),
-                    sprintf('正收益组合: %d 组', (int)($sw['profitableCombos'] ?? 0)),
+                    '扫描吞吐规模',
+                    sprintf('%d 组参数', (int)($sw['totalCombos'] ?? 0)),
+                    sprintf('遍历 %.2f 亿根 K 线 · 正收益 %d 组', $totalEvalBars / 1e8, (int)($sw['profitableCombos'] ?? 0)),
                 ),
                 $metricTile(
                     '高原稳健区 (防过拟合)',
@@ -193,7 +260,7 @@ $sweepPage = function () use ($card, $metricTile, $scopeBar, $syncToolbar, $gree
                 HStack(alignment: VerticalAlignment::center)(
                     VStack(alignment: HorizontalAlignment::leading, spacing: 2)(
                         Text('三维参数高原排行榜 (Fast EMA × Slow EMA × ATR 倍数)')->font(Font::headline),
-                        Text('排序优先选择「周围邻居全部稳定赚钱」的参数高原，自动降权「孤岛尖峰过拟合」参数。')->font(Font::caption)->foregroundStyle(Color::secondary),
+                        Text('零拷贝直读 C 端 SoA 列内存与预计算 ATR 列，多核无锁分片扫描。')->font(Font::caption)->foregroundStyle(Color::secondary),
                     ),
                     Spacer(),
                     Button('重新扫描网格', action: fn() => $this->runSweep(), systemImage: 'bolt.fill')
@@ -223,7 +290,7 @@ $sweepPage = function () use ($card, $metricTile, $scopeBar, $syncToolbar, $gree
                             ->font(Font::caption)
                             ->foregroundStyle($row['netReturnPct'] >= 0 ? $green : $red)
                             ->frame(width: 95, alignment: Alignment::leading),
-                        Text(verbatim: sprintf('PF %.2f · 回撤 -%.1f%% · %d笔', $row['profitFactor'], $row['maxDrawdownPct'], $row['trades']))
+                        Text(verbatim: sprintf('PF %.2f · 回撤 -%.1f%% · %s笔', $row['profitFactor'], $row['maxDrawdownPct'], number_format($row['trades'])))
                             ->font(Font::caption)
                             ->foregroundStyle(Color::secondary),
                         Spacer(),
@@ -239,6 +306,7 @@ $sweepPage = function () use ($card, $metricTile, $scopeBar, $syncToolbar, $gree
 $journalPage = function () use ($card, $scopeBar, $syncToolbar, $green, $red): View {
     $r = $this->report;
     $trades = $r['trades'] ?? [];
+    $totalClosed = (int)($r['closedTrades'] ?? count($trades));
     $grossWin = (float)($r['grossProfitQuote'] ?? 0.0);
     $fees = (float)($r['totalFeesQuote'] ?? 0.0);
     $feeShare = $grossWin > 1.0 ? ($fees / $grossWin * 100.0) : 0.0;
@@ -261,12 +329,12 @@ $journalPage = function () use ($card, $scopeBar, $syncToolbar, $green, $red): V
                 )->font(Font::caption)->foregroundStyle(Color::secondary),
             ),
             $card(
-                Text(verbatim: sprintf('历史闭合交易明细（最新 %d / 共 %d 笔）', min(30, count($trades)), count($trades)))->font(Font::headline),
+                Text(verbatim: sprintf('历史闭合交易明细（最新 %d / 共 %s 笔）', count($trades), number_format($totalClosed)))->font(Font::headline),
                 $trades === []
                     ? ContentUnavailableView('暂无闭合交易', systemImage: 'tray', description: '请调整参数或切换周期运行回测。')
-                    : Each(array_slice($trades, 0, 30), id: 'id')(fn(array $t) => HStack(alignment: VerticalAlignment::center, spacing: 10)(
-                        Text(verbatim: sprintf('#%d', $t['id']))->font(Font::caption)->foregroundStyle(Color::secondary)->frame(width: 36, alignment: Alignment::leading),
-                        Text(verbatim: "{$t['entryTime']} → {$t['exitTime']}")->font(Font::caption)->frame(width: 145, alignment: Alignment::leading),
+                    : Each($trades, id: 'id')(fn(array $t) => HStack(alignment: VerticalAlignment::center, spacing: 10)(
+                        Text(verbatim: sprintf('#%d', $t['id']))->font(Font::caption)->foregroundStyle(Color::secondary)->frame(width: 56, alignment: Alignment::leading),
+                        Text(verbatim: "{$t['entryTime']} → {$t['exitTime']}")->font(Font::caption)->frame(width: 175, alignment: Alignment::leading),
                         Text(verbatim: sprintf('入 %.2f / 出 %.2f', $t['entryPrice'], $t['exitPrice']))->font(Font::caption)->frame(width: 175, alignment: Alignment::leading),
                         Text(verbatim: $t['reason'])->font(Font::caption)->foregroundStyle(Color::secondary)->frame(width: 95, alignment: Alignment::leading),
                         Spacer(),
@@ -287,7 +355,7 @@ $guidePage = fn() => ScrollView(Axis::vertical)(
             Text('2. 指标正交不堆砌：1 个趋势/状态维度（EMA）+ 1 个波动率硬止损维度（Wilder ATR）远胜十几个同质化震荡指标堆出的 if/else。')->font(Font::body),
             Text('3. 以损定量（Position Sizing）：每笔交易开仓量由「净值 × 1% 风险预算 ÷ ATR 止损距离」反推，绝不无止损硬扛或百倍杠杆赌命。')->font(Font::body),
             Text('4. 只选参数高原，拒绝孤岛尖峰：在「C 原生参数高原」页确认邻近参数格 >=65% 同步盈利，严禁挑单点最优值实盘。')->font(Font::body),
-            Text('5. 样本外与模拟盘门禁：任何策略必须覆盖 >=100 笔交易样本，通过未参与调参的样本外区间验证后再上小资金。')->font(Font::body),
+            Text('5. 百万级回测零拷贝架构：数据常驻 C 端 Columnar SoA 列内存 + 二进制 LOD 极值金字塔，PHP 仅持句柄与视图切片，兼顾微秒级缩放与多核并行寻优。')->font(Font::body),
         ),
     )->padding(Edge::horizontal, 20)->padding(Edge::bottom, 20)->padding(Edge::top, 8)
 )->navigationTitle('量化手册');

@@ -2,11 +2,6 @@
 # Cross-platform native C library builder for MyQuant (`libquant_sweep`).
 # Places compiled artifacts directly into `resources/<os>-<arch>/` where
 # MyPHP's `Resources` bundler and `FfiGen::resolveLibrary()` load them.
-#
-# Usage:
-#   ./scripts/build_native.sh                 # builds for current host (and universal darwin arm64+amd64 on macOS)
-#   ./scripts/build_native.sh linux-amd64     # cross-compiles via `zig cc` or target gcc when available
-#   ./scripts/build_native.sh windows-amd64   # cross-compiles `quant_sweep.dll` via `zig cc` or MinGW
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -19,26 +14,26 @@ build_target() {
 
     case "$target" in
         darwin-arm64)
-            clang -O3 -ffast-math -shared -fPIC -arch arm64 "$SRC" -lm -o "$out_dir/libquant_sweep.dylib"
+            clang -O3 -fno-math-errno -shared -fPIC -arch arm64 "$SRC" -lm -o "$out_dir/libquant_sweep.dylib"
             echo "built $out_dir/libquant_sweep.dylib"
             ;;
         darwin-amd64)
-            clang -O3 -ffast-math -shared -fPIC -arch x86_64 "$SRC" -lm -o "$out_dir/libquant_sweep.dylib"
+            clang -O3 -fno-math-errno -shared -fPIC -arch x86_64 "$SRC" -lm -o "$out_dir/libquant_sweep.dylib"
             echo "built $out_dir/libquant_sweep.dylib"
             ;;
         linux-amd64)
             if command -v zig >/dev/null 2>&1; then
-                zig cc -target x86_64-linux-gnu -O3 -shared -fPIC "$SRC" -lm -o "$out_dir/libquant_sweep.so"
+                zig cc -target x86_64-linux-gnu -O3 -shared -fPIC -pthread "$SRC" -lm -o "$out_dir/libquant_sweep.so"
             else
-                ${CC:-cc} -O3 -shared -fPIC "$SRC" -lm -o "$out_dir/libquant_sweep.so"
+                ${CC:-cc} -O3 -shared -fPIC -pthread "$SRC" -lm -o "$out_dir/libquant_sweep.so"
             fi
             echo "built $out_dir/libquant_sweep.so"
             ;;
         linux-arm64)
             if command -v zig >/dev/null 2>&1; then
-                zig cc -target aarch64-linux-gnu -O3 -shared -fPIC "$SRC" -lm -o "$out_dir/libquant_sweep.so"
+                zig cc -target aarch64-linux-gnu -O3 -shared -fPIC -pthread "$SRC" -lm -o "$out_dir/libquant_sweep.so"
             else
-                ${CC:-cc} -O3 -shared -fPIC "$SRC" -lm -o "$out_dir/libquant_sweep.so"
+                ${CC:-cc} -O3 -shared -fPIC -pthread "$SRC" -lm -o "$out_dir/libquant_sweep.so"
             fi
             echo "built $out_dir/libquant_sweep.so"
             ;;

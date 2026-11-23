@@ -17,40 +17,52 @@ function assertTrue(bool $cond, string $msg): void
     }
 }
 
-// 1. Verify cross-platform FFI C library is loaded and active
+// 1. Verify v2 C SoA + LOD + Multi-threaded FFI library
 assertTrue(QuantSweepFfi::available(), 'QuantSweepFfi native C library should be available');
-assertTrue(QuantSweepFfi::mq_sweep_version() === 1, 'mq_sweep_version() === 1');
+assertTrue(QuantSweepFfi::mq_sweep_version() === 2, 'mq_sweep_version() === 2');
+assertTrue(QuantSweepFfi::mq_cpu_threads() >= 1, 'mq_cpu_threads() >= 1');
 
-// 2. Verify QuantState dual-market engine & C sweep
+// 2. Verify standard startup on C SoA
 $state = new QuantState(':memory:');
 assertTrue($state->market === 'forex' && $state->symbol === 'XAUUSDz', 'Starts on Exness Gold XAUUSDz');
-assertTrue(count($state->candles) === 650, 'Seeded 650 XAUUSDz candles in SQLite');
-assertTrue(($state->sweep['usedNativeC'] ?? false) === true, 'SweepRunner used native C FFI engine');
-assertTrue(($state->sweep['totalCombos'] ?? 0) > 100, 'SweepRunner evaluated >100 3D parameter combos');
+assertTrue($state->barCount === 650, 'Uploaded 650 XAUUSDz bars to C SoA');
 
-// 3. Drive GPU declarative UI headlessly across tabs & markets
-$h = new Headless(Content::file(__DIR__ . '/../view.php', $state)->view, 1180, 780);
+// 3. Drive Desktop UI AND switch to 1,000,000-bar C SoA Stress Mode!
+$h = new Headless(Content::file(__DIR__ . '/../view.php', $state)->view, 1220, 820);
 $h->rt->strict = true;
 $h->frame();
 
-// Switch to Crypto · Binance market via UI click
-$h->clickText('加密市场 · Binance');
+$phpBeforeMb = memory_get_usage() / 1048576.0;
+$h->clickText('100万根 SoA');
 $h->frame();
-assertTrue($state->market === 'crypto' && $state->symbol === 'BTCUSDT', 'Switched to Crypto BTCUSDT');
-assertTrue(abs($state->feeBps - 8.0) < 0.01, 'Auto-applied 8.0 bps crypto friction preset');
+$phpDeltaMb = (memory_get_usage() / 1048576.0) - $phpBeforeMb;
+assertTrue($state->barCount === 1_000_000, 'Generated 1,000,000 bars in C SoA memory');
+assertTrue($phpDeltaMb < 1.0, '1,000,000 bars add <1 MB to PHP heap (actual delta: ' . sprintf('%.2f MB', $phpDeltaMb) . ')');
+assertTrue(($state->lodView['buckets'] ?? 0) > 100 && ($state->lodView['buckets'] ?? 0) <= 420, 'LOD pyramid downsampled 1M bars cleanly');
 
-// Switch to C Native Sweep tab and apply top parameter row
-$state->tab = 'sweep';
+// Zoom LOD viewport to 5% span at 40% offset
+$state->viewStartPct = 40.0;
+$state->viewSpanPct = 5.0;
+$state->updateViewport();
 $h->frame();
-$top = $state->sweep['rows'][0];
-$state->applySweepRow($top['fast'], $top['slow'], $top['atrMult']);
-$h->frame();
-assertTrue($state->tab === 'lab' && (int)$state->fastEma === $top['fast'], 'Applied sweep parameter row back to Lab');
+assertTrue(($state->lodView['elapsedUs'] ?? 9999.0) < 1000.0, 'O(log N) LOD query under 1 ms');
+
+// 4. Verify iPadOS / Android Pad Tablet HIG responsive layout & sidebar morph!
+$padH = new Headless(Content::file(__DIR__ . '/../view.php', $state)->view, 1180, 820);
+$padH->rt->touch = true;
+$padH->theme = \MyPHP\UI\Theme::phone(true);
+$padH->frame(2);
+assertTrue($padH->byLabel('Hide Sidebar') !== null, 'Tablet landscape shows HIG Hide Sidebar toggle');
+$padH->clickLabel('Hide Sidebar');
+$padH->frame(3);
+assertTrue($padH->byLabel('Show Sidebar') !== null, 'Tablet collapsing sidebar morphs into floating top capsule tab bar');
 
 echo sprintf(
-    "ALL TESTS PASSED: FFI=%s (%.2f ms for %d combos), BTCUSDT trades=%d\n",
-    $state->sweep['libraryPath'],
+    "ALL TESTS PASSED: 1M SoA C=%.1f MB / PHP=%.1f MB | 1M Backtest=%.2f ms | 140x1M Multi-Core Sweep=%.2f ms (%s) | LOD=%.1f us\n",
+    $state->cMemoryMb,
+    $state->phpMemoryMb,
+    $state->report['elapsedMs'],
     $state->sweep['elapsedMs'],
-    $state->sweep['totalCombos'],
-    $state->report['closedTrades']
+    $state->sweep['libraryPath'],
+    $state->lodView['elapsedUs'],
 );

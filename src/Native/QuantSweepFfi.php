@@ -9,13 +9,90 @@ use FFI\CData;
 
 final class QuantSweepFfi
 {
-    public const MQ_SWEEP_VERSION = 1;
+    public const MQ_SWEEP_VERSION = 2;
     public const MQ_METRICS_STRIDE = 8;
+    public const MQ_BACKTEST_SUMMARY_LEN = 14;
+    public const MQ_TRADE_STRIDE = 8;
     public const MQ_ATR_PERIOD = 14;
 
     public const LIBRARY = 'quant_sweep';
 
     public const CDEF = 'int mq_sweep_version(void);
+int mq_cpu_threads(void);
+int mq_dataset_alloc(
+ const int64_t *open_time_ms,
+ const double *opens,
+ const double *highs,
+ const double *lows,
+ const double *closes,
+ const double *volumes,
+ int n_candles
+);
+int mq_dataset_generate_mock(
+ int n_candles,
+ double base_price,
+ double bar_volatility,
+ int64_t start_time_ms,
+ int64_t step_ms,
+ uint64_t seed
+);
+void mq_dataset_free(int ds_id);
+int mq_dataset_count(int ds_id);
+int64_t mq_dataset_memory_bytes(int ds_id);
+int mq_dataset_update_last(
+ int ds_id,
+ int64_t open_time_ms,
+ double open,
+ double high,
+ double low,
+ double close,
+ double volume
+);
+int mq_dataset_query_lod(
+ int ds_id,
+ int from_idx,
+ int to_idx,
+ int max_out,
+ double *out_xs,
+ double *out_closes,
+ double *out_highs,
+ double *out_lows,
+ double *out_extremes
+);
+int mq_backtest_on_dataset(
+ int ds_id,
+ int fast_period,
+ int slow_period,
+ double atr_mult,
+ double initial_equity,
+ double fee_rate,
+ double risk_pct,
+ double max_leverage,
+ double *out_summary,
+ double *out_xs,
+ double *out_strategy_ys,
+ double *out_hold_ys,
+ double *out_drawdown_ys,
+ int max_curve_pts,
+ double *out_trades,
+ int max_trades
+);
+int mq_sweep_on_dataset(
+ int ds_id,
+ const int *fast_list,
+ int n_fast,
+ const int *slow_list,
+ int n_slow,
+ const double *atr_mults,
+ int n_atr,
+ double initial_equity,
+ double fee_rate,
+ double risk_pct,
+ double max_leverage,
+ int n_threads,
+ double *out_metrics,
+ int max_combos
+);
 int mq_sweep_ema_atr(
  const double *highs,
  const double *lows,
@@ -125,6 +202,85 @@ int mq_sweep_ema_atr(
     public static function mq_sweep_version(): int
     {
         return self::ffi()->mq_sweep_version();
+    }
+
+    public static function mq_cpu_threads(): int
+    {
+        return self::ffi()->mq_cpu_threads();
+    }
+
+    /**
+     * @param CData|null $open_time_ms
+     * @param CData|null $opens
+     * @param CData|null $highs
+     * @param CData|null $lows
+     * @param CData|null $closes
+     * @param CData|null $volumes
+     */
+    public static function mq_dataset_alloc(mixed $open_time_ms, mixed $opens, mixed $highs, mixed $lows, mixed $closes, mixed $volumes, int $n_candles): int
+    {
+        return self::ffi()->mq_dataset_alloc($open_time_ms, $opens, $highs, $lows, $closes, $volumes, $n_candles);
+    }
+
+    public static function mq_dataset_generate_mock(int $n_candles, float $base_price, float $bar_volatility, int $start_time_ms, int $step_ms, int $seed): int
+    {
+        return self::ffi()->mq_dataset_generate_mock($n_candles, $base_price, $bar_volatility, $start_time_ms, $step_ms, $seed);
+    }
+
+    public static function mq_dataset_free(int $ds_id): void
+    {
+        self::ffi()->mq_dataset_free($ds_id);
+    }
+
+    public static function mq_dataset_count(int $ds_id): int
+    {
+        return self::ffi()->mq_dataset_count($ds_id);
+    }
+
+    public static function mq_dataset_memory_bytes(int $ds_id): int
+    {
+        return self::ffi()->mq_dataset_memory_bytes($ds_id);
+    }
+
+    public static function mq_dataset_update_last(int $ds_id, int $open_time_ms, float $open, float $high, float $low, float $close, float $volume): int
+    {
+        return self::ffi()->mq_dataset_update_last($ds_id, $open_time_ms, $open, $high, $low, $close, $volume);
+    }
+
+    /**
+     * @param CData|null $out_xs
+     * @param CData|null $out_closes
+     * @param CData|null $out_highs
+     * @param CData|null $out_lows
+     * @param CData|null $out_extremes
+     */
+    public static function mq_dataset_query_lod(int $ds_id, int $from_idx, int $to_idx, int $max_out, mixed $out_xs, mixed $out_closes, mixed $out_highs, mixed $out_lows, mixed $out_extremes): int
+    {
+        return self::ffi()->mq_dataset_query_lod($ds_id, $from_idx, $to_idx, $max_out, $out_xs, $out_closes, $out_highs, $out_lows, $out_extremes);
+    }
+
+    /**
+     * @param CData|null $out_summary
+     * @param CData|null $out_xs
+     * @param CData|null $out_strategy_ys
+     * @param CData|null $out_hold_ys
+     * @param CData|null $out_drawdown_ys
+     * @param CData|null $out_trades
+     */
+    public static function mq_backtest_on_dataset(int $ds_id, int $fast_period, int $slow_period, float $atr_mult, float $initial_equity, float $fee_rate, float $risk_pct, float $max_leverage, mixed $out_summary, mixed $out_xs, mixed $out_strategy_ys, mixed $out_hold_ys, mixed $out_drawdown_ys, int $max_curve_pts, mixed $out_trades, int $max_trades): int
+    {
+        return self::ffi()->mq_backtest_on_dataset($ds_id, $fast_period, $slow_period, $atr_mult, $initial_equity, $fee_rate, $risk_pct, $max_leverage, $out_summary, $out_xs, $out_strategy_ys, $out_hold_ys, $out_drawdown_ys, $max_curve_pts, $out_trades, $max_trades);
+    }
+
+    /**
+     * @param CData|null $fast_list
+     * @param CData|null $slow_list
+     * @param CData|null $atr_mults
+     * @param CData|null $out_metrics
+     */
+    public static function mq_sweep_on_dataset(int $ds_id, mixed $fast_list, int $n_fast, mixed $slow_list, int $n_slow, mixed $atr_mults, int $n_atr, float $initial_equity, float $fee_rate, float $risk_pct, float $max_leverage, int $n_threads, mixed $out_metrics, int $max_combos): int
+    {
+        return self::ffi()->mq_sweep_on_dataset($ds_id, $fast_list, $n_fast, $slow_list, $n_slow, $atr_mults, $n_atr, $initial_equity, $fee_rate, $risk_pct, $max_leverage, $n_threads, $out_metrics, $max_combos);
     }
 
     /**

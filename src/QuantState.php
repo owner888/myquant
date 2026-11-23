@@ -4,7 +4,7 @@ declare(strict_types=1);
 namespace MyQuant;
 
 use MyPHP\{App, PathName, Window};
-use MyQuant\Data\{Candle, CandleStore, MarketFeed};
+use MyQuant\Data\{CandleStore, DatasetHandle, MarketFeed};
 use MyQuant\Engine\{Backtester, SweepRunner};
 
 final class QuantState
@@ -13,24 +13,32 @@ final class QuantState
     public string $market = 'forex';
     public string $symbol = 'XAUUSDz';
     public string $interval = '15m';
+    public string $scaleMode = 'live'; // 'live' (SQLite/API), '100k', '1m'
 
     public float $fastEma = 12.0;
     public float $slowEma = 36.0;
     public float $atrMult = 2.0;
-    public float $riskPct = 1.0; // % of equity per trade
-    public float $feeBps = 0.2;  // per-leg bps (0.2 bps for Exness Zero XAUUSDz, 8.0 bps for Crypto)
+    public float $riskPct = 1.0;
+    public float $feeBps = 0.2;
+
+    // Viewport pan & zoom over the C LOD pyramid (0..100%)
+    public float $viewStartPct = 0.0;
+    public float $viewSpanPct = 100.0;
 
     public bool $syncing = false;
     public string $statusText = '';
     public string $importPath = '';
     public ?Window $window = null;
 
-    /** @var list<Candle> */
-    public array $candles = [];
+    public int $barCount = 0;
+    public float $cMemoryMb = 0.0;
+    public float $phpMemoryMb = 0.0;
+    public array $lodView = [];
     public array $report = [];
     public array $sweep = [];
 
     private ?CandleStore $store = null;
+    private ?DatasetHandle $dataset = null;
     private int $seq = 0;
 
     public function __construct(?string $dbPath = null)
@@ -59,27 +67,87 @@ final class QuantState
             $this->symbol = $symbols[0];
         }
         $this->feeBps = MarketFeed::MARKETS[$newMarket]['defaultFeeBps'];
-        $this->loadDataset(false);
+        $this->applyScaleOrLoad(false);
     }
 
     public function selectSymbol(string $sym): void
     {
         $this->symbol = $sym;
-        $this->loadDataset(false);
+        $this->applyScaleOrLoad(false);
     }
 
     public function selectInterval(string $iv): void
     {
         $this->interval = $iv;
-        $this->loadDataset(false);
+        $this->applyScaleOrLoad(false);
+    }
+
+    public function selectScaleMode(string $mode): void
+    {
+        if (!in_array($mode, ['live', '100k', '1m'], true)) {
+            return;
+        }
+        $this->scaleMode = $mode;
+        $this->applyScaleOrLoad(false);
+    }
+
+    private function applyScaleOrLoad(bool $preferOnline): void
+    {
+        if ($this->scaleMode === '100k') {
+            $this->loadNativeMock(100_000);
+        } elseif ($this->scaleMode === '1m') {
+            $this->loadNativeMock(1_000_000);
+        } else {
+            $this->loadDataset($preferOnline);
+        }
+    }
+
+    /**
+     * Generates 100K or 1,000,000 bars directly in C Columnar SoA memory + Binary LOD Pyramid (zero PHP objects).
+     */
+    public function loadNativeMock(int $count): void
+    {
+        [$basePrice, $vol] = match ($this->symbol) {
+            'XAUUSDz', 'PAXGUSDT' => [4380.0, 0.00075],
+            'EURUSDz' => [1.0850, 0.00035],
+            'USDJPYz' => [153.40, 0.00045],
+            'ETHUSDT' => [3420.0, 0.0016],
+            'SOLUSDT' => [195.0, 0.0022],
+            default => [92500.0, 0.0013],
+        };
+        $stepMs = MarketFeed::intervalMs($this->interval);
+        $startMs = 1780617600_000 - $count * $stepMs;
+        $seed = (crc32("{$this->market}:{$this->symbol}:{$this->interval}:$count") & 0x7fffffff) + 17;
+
+        $t0 = hrtime(true);
+        $this->dataset?->release();
+        $this->dataset = DatasetHandle::generateMock($count, $basePrice, $vol, $startMs, $stepMs, $seed);
+        $genMs = (hrtime(true) - $t0) / 1e6;
+
+        $this->syncTelemetry();
+        $this->recomputeAll();
+        $this->statusText = sprintf(
+            'C 原生 SoA 驻留 · %s · %s 根 K 线（建模+LOD金字塔 %.1f ms · C 内存 %.1f MB · PHP 堆 %.1f MB）',
+            $this->symbol,
+            number_format($this->barCount),
+            $genMs,
+            $this->cMemoryMb,
+            $this->phpMemoryMb,
+        );
     }
 
     public function loadDataset(bool $preferOnline): void
     {
-        $cached = $this->store?->load($this->market, $this->symbol, $this->interval, 1000) ?? [];
+        $this->scaleMode = 'live';
+        $cached = $this->store?->load($this->market, $this->symbol, $this->interval, 1500) ?? [];
         if ($cached !== [] && !$preferOnline) {
-            $this->candles = $cached;
-            $this->statusText = sprintf('已加载本地缓存 · %s (%s) · %d 根 K 线', $this->symbol, $this->interval, count($cached));
+            $this->installCandles($cached);
+            $this->statusText = sprintf(
+                '本地缓存 → C SoA 驻留 · %s (%s) · %d 根 K 线（PHP 零对象驻留）',
+                $this->symbol,
+                $this->interval,
+                $this->barCount,
+            );
             $this->recomputeAll();
             return;
         }
@@ -87,8 +155,13 @@ final class QuantState
         if (!$preferOnline) {
             $seed = MarketFeed::syntheticDataset($this->market, $this->symbol, $this->interval, 650);
             $this->store?->save($this->market, $this->symbol, $this->interval, $seed);
-            $this->candles = $seed;
-            $this->statusText = sprintf('内置 %s (%s) 基准行情 · %d 根 K 线（点击「同步实盘行情」拉取最新数据）', $this->symbol, $this->interval, count($seed));
+            $this->installCandles($seed);
+            $this->statusText = sprintf(
+                '内置 %s (%s) 基准行情 · %d 根 K 线（点击右上角同步实盘，或切 100万根 压测 C SoA）',
+                $this->symbol,
+                $this->interval,
+                $this->barCount,
+            );
             $this->recomputeAll();
             return;
         }
@@ -102,7 +175,7 @@ final class QuantState
 
         App::go(function () use ($seq, $market, $symbol, $interval): void {
             try {
-                $fresh = MarketFeed::fetchOnline($market, $symbol, $interval, 800);
+                $fresh = MarketFeed::fetchOnline($market, $symbol, $interval, 1000);
                 $err = null;
             } catch (\Throwable $e) {
                 $fresh = [];
@@ -114,13 +187,49 @@ final class QuantState
             $this->syncing = false;
             if ($fresh !== []) {
                 $this->store?->save($market, $symbol, $interval, $fresh);
-                $this->candles = $fresh;
-                $this->statusText = sprintf('已同步线上实盘行情 · %s (%s) · %d 根 K 线', $symbol, $interval, count($fresh));
+                $this->installCandles($fresh);
+                $this->statusText = sprintf('已同步线上实盘 → C SoA · %s (%s) · %d 根 K 线', $symbol, $interval, $this->barCount);
                 $this->recomputeAll();
             } else {
-                $this->statusText = '线上同步失败（继续使用本地行情）: ' . $err;
+                $this->statusText = '线上同步失败（继续使用当前数据）: ' . $err;
             }
         });
+    }
+
+    /**
+     * Uploads PHP candles into C SoA once and immediately drops the PHP array.
+     *
+     * @param list<\MyQuant\Data\Candle> $candles
+     */
+    private function installCandles(array $candles): void
+    {
+        $this->dataset?->release();
+        $this->dataset = DatasetHandle::fromCandles($candles);
+        $this->syncTelemetry();
+    }
+
+    private function syncTelemetry(): void
+    {
+        $this->barCount = $this->dataset?->count ?? 0;
+        $this->cMemoryMb = $this->dataset?->cMemoryMb ?? 0.0;
+        $this->phpMemoryMb = memory_get_usage() / 1048576.0;
+        $this->updateViewport();
+    }
+
+    public function updateViewport(): void
+    {
+        if ($this->dataset === null || $this->barCount <= 0) {
+            $this->lodView = ['xs' => [0.0, 1.0], 'closes' => [1.0, 1.0], 'low' => 0.0, 'high' => 1.0, 'elapsedUs' => 0.0, 'buckets' => 0];
+            return;
+        }
+        $spanPct = max(1.0, min(100.0, $this->viewSpanPct));
+        $startPct = max(0.0, min(100.0 - $spanPct, $this->viewStartPct));
+        $this->viewStartPct = $startPct;
+        $this->viewSpanPct = $spanPct;
+
+        $from = (int)floor($this->barCount * ($startPct / 100.0));
+        $to = max($from + 8, (int)ceil($this->barCount * (($startPct + $spanPct) / 100.0)));
+        $this->lodView = $this->dataset->queryLod($from, min($this->barCount, $to), 420);
     }
 
     public function importLocalFile(): void
@@ -136,9 +245,11 @@ final class QuantState
                 $this->statusText = '导入失败：有效 K 线不足 30 根';
                 return;
             }
+            $this->scaleMode = 'live';
             $this->store?->save($this->market, $this->symbol, $this->interval, $imported);
-            $this->candles = $imported;
-            $this->statusText = sprintf('成功从文件导入 %d 根 %s (%s) K 线', count($imported), $this->symbol, $this->interval);
+            $this->installCandles($imported);
+            unset($imported);
+            $this->statusText = sprintf('已导入 %s 根 %s (%s) K 线至 C SoA 内存', number_format($this->barCount), $this->symbol, $this->interval);
             $this->recomputeAll();
         } catch (\Throwable $e) {
             $this->statusText = '导入异常: ' . $e->getMessage();
@@ -147,18 +258,22 @@ final class QuantState
 
     public function recomputeAll(): void
     {
+        $this->updateViewport();
         $this->runBacktest();
         $this->runSweep();
     }
 
     public function runBacktest(): void
     {
+        if ($this->dataset === null) {
+            return;
+        }
         $fast = max(2, (int)round($this->fastEma));
         $slow = max($fast + 2, (int)round($this->slowEma));
         $this->slowEma = (float)$slow;
 
-        $this->report = Backtester::run(
-            candles: $this->candles,
+        $this->report = Backtester::runOnDataset(
+            ds: $this->dataset,
             fastPeriod: $fast,
             slowPeriod: $slow,
             atrMult: max(0.5, $this->atrMult),
@@ -167,12 +282,16 @@ final class QuantState
             initialEquity: 10000.0,
             maxLeverage: $this->market === 'forex' ? 3.0 : 1.0,
         );
+        $this->phpMemoryMb = memory_get_usage() / 1048576.0;
     }
 
     public function runSweep(): void
     {
-        $this->sweep = SweepRunner::sweep(
-            candles: $this->candles,
+        if ($this->dataset === null) {
+            return;
+        }
+        $this->sweep = SweepRunner::sweepOnDataset(
+            ds: $this->dataset,
             fastList: [6, 9, 12, 16, 20, 25],
             slowList: [24, 32, 42, 55, 72, 96],
             atrMults: [1.5, 2.0, 2.5, 3.0],
@@ -181,11 +300,9 @@ final class QuantState
             riskPct: max(0.001, $this->riskPct / 100.0),
             maxLeverage: $this->market === 'forex' ? 3.0 : 1.0,
         );
+        $this->phpMemoryMb = memory_get_usage() / 1048576.0;
     }
 
-    /**
-     * Applies a parameter combination from the C FFI grid sweep directly into the Backtest Lab.
-     */
     public function applySweepRow(int $fast, int $slow, float $atrMult): void
     {
         $this->fastEma = (float)$fast;
@@ -193,6 +310,13 @@ final class QuantState
         $this->atrMult = $atrMult;
         $this->runBacktest();
         $this->tab = 'lab';
-        $this->statusText = sprintf('已套用高原参数：Fast EMA %d / Slow EMA %d / ATR %.1fx', $fast, $slow, $atrMult);
+        $this->statusText = sprintf(
+            '已套用高原参数：EMA(%d, %d) · ATR %.1fx（%s 根 K 线回测耗时 %.2f ms）',
+            $fast,
+            $slow,
+            $atrMult,
+            number_format($this->barCount),
+            (float)($this->report['elapsedMs'] ?? 0.0),
+        );
     }
 }
