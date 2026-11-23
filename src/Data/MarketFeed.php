@@ -65,7 +65,7 @@ final class MarketFeed
             min(1000, max(60, $limit))
         );
         [$body, $resp] = URLSession::shared()->data(for: new URLRequest($url));
-        if (!$resp->ok()) {
+        if ($resp->statusCode < 200 || $resp->statusCode >= 300) {
             throw new RuntimeException("HTTP {$resp->statusCode} fetching $symbol ($interval)");
         }
         $raw = json_decode($body, true);
