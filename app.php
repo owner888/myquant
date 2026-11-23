@@ -15,10 +15,15 @@ if (($initTab = getenv('MYQUANT_TAB')) && is_string($initTab)) {
 
 App::whenReady(function () use ($state): void {
     [$w, $h] = Device::isDesktop() ? [1180, 780] : [402, 874];
+    $macDesktop = PHP_OS_FAMILY === 'Darwin' && Device::isDesktop();
     $state->window = new Window(new WindowOptions(
-        title: 'MyQuant — 跨市场量化研究工作台',
+        title: 'MyQuant',
         width: $w,
         height: $h,
+        minWidth: 920,
+        minHeight: 620,
+        titleBarStyle: $macDesktop ? 'hiddenInset' : 'default',
+        vibrancy: $macDesktop ? 'sidebar' : '',
         stateKey: 'main',
         content: Content::file(__DIR__ . '/view.php', $state),
     ));
