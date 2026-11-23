@@ -6,7 +6,7 @@
     "require": {
         "php": ">=8.4",
         "ext-ffi": "*",
-        "owner888/myphp": "^1.203.17"
+        "owner888/myphp": "^1.203.18"
     },
     "autoload": {
         "psr-4": {
