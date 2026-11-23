@@ -4,20 +4,20 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "4307baa2dc320470e502cf6b4a5f58d7",
+    "content-hash": "ee9f122f3f9e8e34decc88efcdb53d54",
     "packages": [
         {
             "name": "owner888/myphp",
-            "version": "v1.203.22",
+            "version": "v1.203.23",
             "source": {
                 "type": "git",
                 "url": "https://github.com/owner888/myphp.git",
-                "reference": "57b0c773c3f09ed3c58bcb67a411a987aa3de163"
+                "reference": "3d194012ebcf34e03cfdc54537eda7dad737f2cf"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/owner888/myphp/zipball/57b0c773c3f09ed3c58bcb67a411a987aa3de163",
-                "reference": "57b0c773c3f09ed3c58bcb67a411a987aa3de163",
+                "url": "https://api.github.com/repos/owner888/myphp/zipball/3d194012ebcf34e03cfdc54537eda7dad737f2cf",
+                "reference": "3d194012ebcf34e03cfdc54537eda7dad737f2cf",
                 "shasum": ""
             },
             "require": {
@@ -43,10 +43,10 @@
             "description": "Desktop apps in PHP, with native UI or a web frontend, over ext-ffi.",
             "support": {
                 "issues": "https://github.com/owner888/myphp/issues",
-                "source": "https://github.com/owner888/myphp/tree/v1.203.22"
+                "source": "https://github.com/owner888/myphp/tree/v1.203.23"
             },
-            "time": "2026-11-23T13:54:00+00:00",
-            "published-time": "2026-11-23T13:54:15+00:00"
+            "time": "2026-11-23T17:57:13+00:00",
+            "published-time": "2026-11-23T17:57:28+00:00"
         }
     ],
     "packages-dev": [],

@@ -2,7 +2,7 @@
 declare(strict_types=1);
 
 require __DIR__ . '/../boot.php';
-require __DIR__ . '/../vendor/owner888/myphp/tests/Headless.php';
+require (getenv('MYPHP_HOME') ?: (__DIR__ . '/../vendor/owner888/myphp')) . '/tests/Headless.php';
 
 use MyPHP\Tests\Headless;
 use MyPHP\UI\Content;
