@@ -4,3 +4,4 @@
 /vendor/
 *.local.php
 .DS_Store
+/.agents/skills/myphp-app/
