@@ -64,20 +64,36 @@ final class CandleStore
         }
 
         $targetCount = $limit > 0 ? min($total, $limit) : $total;
+        return $this->loadRows($market, $symbol, $interval, $total - $targetCount, $targetCount);
+    }
+
+    /**
+     * 按时间升序跳过 $skip 根后取 $count 根装入一个独立的 C SoA 数据集，供样本内 / 样本外切分
+     * （前段选参数、后段只验证）；越界部分截掉，取不到返回 null。调用方负责 release()。
+     */
+    public function loadSlice(string $market, string $symbol, string $interval, int $skip, int $count): ?DatasetHandle
+    {
+        $skip = max(0, $skip);
+        $count = min($count, $this->count($market, $symbol, $interval) - $skip);
+        return $count > 0 ? $this->loadRows($market, $symbol, $interval, $skip, $count) : null;
+    }
+
+    private function loadRows(string $market, string $symbol, string $interval, int $skip, int $targetCount): ?DatasetHandle
+    {
         $minOpenTimeMs = -1;
-        if ($limit > 0 && $total > $limit) {
+        if ($skip > 0) {
             $bound = $this->conn()->query(
                 'SELECT open_time_ms FROM candles
                  WHERE market = ? AND symbol = ? AND interval = ?
-                 ORDER BY open_time_ms DESC
+                 ORDER BY open_time_ms ASC
                  LIMIT 1 OFFSET ?',
                 $market,
                 $symbol,
                 $interval,
-                $limit - 1,
+                $skip - 1,
             );
             if (isset($bound->values[0][0])) {
-                $minOpenTimeMs = (int)$bound->values[0][0] - 1;
+                $minOpenTimeMs = (int)$bound->values[0][0];
             }
         }
 
@@ -205,6 +221,12 @@ final class CandleStore
             );
         }
         $this->conn()->transaction($stmts);
+    }
+
+    /** 删除该品种/周期已存的全部 K 线（拉取真实历史前清掉内置合成行情，避免两者混在一条序列里）。 */
+    public function clear(string $market, string $symbol, string $interval): void
+    {
+        $this->conn()->execute('DELETE FROM candles WHERE market = ? AND symbol = ? AND interval = ?', $market, $symbol, $interval);
     }
 
     /**

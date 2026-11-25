@@ -152,6 +152,12 @@ $syncToolbar = function () use ($isCompact): array {
             action: fn() => $this->loadDataset(true),
             systemImage: 'arrow.clockwise',
         )->disabled($this->syncing),
+        Menu($compact ? '历史' : '拉取真实历史', systemImage: 'clock.arrow.circlepath')(
+            Each(MarketFeed::HISTORY_SPANS)(fn(string $label, int $days) => Button(
+                sprintf('%s（约 %d 页）', $label, MarketFeed::historyPages($this->interval, $days)),
+                action: fn() => $this->syncHistory($days),
+            )),
+        )->disabled($this->syncing),
     ];
 };
 
@@ -241,7 +247,10 @@ $labPage = function () use ($isCompact, $card, $metricTile, $scopeBar, $syncTool
                     ->frame(height: 155),
                 LazyVGrid(columns: [GridItem::adaptive(minimum: 240)], spacing: 16)(
                     VStack(alignment: HorizontalAlignment::leading, spacing: 4)(
-                        Text(verbatim: sprintf('视野起点偏移: %.1f%%', $this->viewStartPct))->font(Font::caption)->foregroundStyle(Color::secondary),
+                        Text(verbatim: $this->viewSpanPct >= 100.0
+                            ? sprintf('视野起点偏移: %.1f%%（跨度为 100%% 时无法平移，请先缩小跨度）', $this->viewStartPct)
+                            : sprintf('视野起点偏移: %.1f%%（当前跨度下最大 %.1f%%）', $this->viewStartPct, 100.0 - $this->viewSpanPct)
+                        )->font(Font::caption)->foregroundStyle(Color::secondary),
                         Slider(value: $this->viewStartPct, in: [0.0, 99.0], step: 0.5, onEditingChanged: fn(bool $e) => !$e && $this->updateViewport())
                             ->onChange(of: $this->viewStartPct, action: fn() => $this->updateViewport()),
                     ),
@@ -348,6 +357,11 @@ $sweepPage = function () use ($isCompact, $card, $metricTile, $scopeBar, $syncTo
     $usedC = (bool)($sw['usedNativeC'] ?? false);
     $rows = $sw['rows'] ?? [];
     $totalEvalBars = $this->barCount * (int)($sw['totalCombos'] ?? 0);
+    $oos = $sw['oos'] ?? null;
+    $oosText = function (array $row) use ($oos): ?string {
+        $o = $row['oos'] ?? null;
+        return $oos === null || $o === null ? null : sprintf('样本外 %+.1f%% · PF %.2f · %s笔', $o['netReturnPct'], $o['profitFactor'], number_format($o['trades']));
+    };
 
     return ScrollView(Axis::vertical)(
         VStack(alignment: HorizontalAlignment::leading, spacing: 14)(
@@ -370,6 +384,14 @@ $sweepPage = function () use ($isCompact, $card, $metricTile, $scopeBar, $syncTo
                     '周围 >=65% 邻格均保持正期望',
                     (int)($sw['plateauCombos'] ?? 0) > 0 ? $green : $red,
                 ),
+                $oos === null
+                    ? $metricTile('样本外验证', '未启用', '需已落盘的标准行情且不少于 1,000 根：先「拉取真实历史」或「导入数据」')
+                    : $metricTile(
+                        sprintf('样本外验证 (后 %d%%，%s 根)', 100 - $oos['trainPct'], number_format($oos['testBars'])),
+                        $oos['top'] > 0 ? sprintf('%d / %d 仍盈利', $oos['held'], $oos['top']) : '无盈利参数',
+                        sprintf('排行榜只用前 %d%%（%s 根）挑参数；样本内前列盈利的组合在未见过的后段的表现', $oos['trainPct'], number_format($oos['trainBars'])),
+                        $oos['top'] > 0 && $oos['held'] * 2 >= $oos['top'] ? $green : $red,
+                    ),
             ),
             $card(
                 $isPhone
@@ -389,7 +411,7 @@ $sweepPage = function () use ($isCompact, $card, $metricTile, $scopeBar, $syncTo
                             ->buttonStyle(ButtonStyle::borderedProminent),
                     ),
                 Divider(),
-                Each($rows, id: 'id')(function (array $row) use ($isPhone, $green, $amber, $red): View {
+                Each($rows, id: 'id')(function (array $row) use ($isPhone, $green, $amber, $red, $oosText): View {
                     $badgeColor = match ($row['regime']) {
                         '高原稳健' => $green,
                         '孤岛过拟合' => $red,
@@ -416,6 +438,9 @@ $sweepPage = function () use ($isCompact, $card, $metricTile, $scopeBar, $syncTo
                                     ->font(Font::caption2)
                                     ->foregroundStyle(Color::secondary),
                             ),
+                            ($t = $oosText($row)) === null ? null : Text(verbatim: $t)
+                                ->font(Font::caption2)
+                                ->foregroundStyle($row['oos']['netReturnPct'] > 0 ? $green : $red),
                             Divider(),
                         )->padding(Edge::vertical, 4);
                     }
@@ -438,6 +463,9 @@ $sweepPage = function () use ($isCompact, $card, $metricTile, $scopeBar, $syncTo
                         Text(verbatim: sprintf('PF %.2f · 回撤 -%.1f%% · %s笔', $row['profitFactor'], $row['maxDrawdownPct'], number_format($row['trades'])))
                             ->font(Font::caption)
                             ->foregroundStyle(Color::secondary),
+                        ($t = $oosText($row)) === null ? null : Text(verbatim: $t)
+                            ->font(Font::caption)
+                            ->foregroundStyle($row['oos']['netReturnPct'] > 0 ? $green : $red),
                         Spacer(),
                         Button('套用', action: fn() => $this->applySweepRow($row['fast'], $row['slow'], $row['atrMult']))
                             ->buttonStyle(ButtonStyle::bordered),

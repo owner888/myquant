@@ -25,6 +25,8 @@ native/quant_sweep.c (g_datasets[64] 常驻 C 侧列式数组 + Wilder ATR(14) �
 1. **PHP 堆零 K 线驻留**：当 `QuantSweepFfi::available()` 为 `true` 时，`DatasetHandle` 只保存整型槽位句柄 `$id`（`1..64`）、`$count` 和 `$cMemoryMb`，不保留 `$fallbackCandles`。切换品种/周期或销毁 `DatasetHandle` 时必须调用 `release()`（析构函数已兜底调用 `mq_dataset_free`），防止 64 个静态槽位泄漏。
 2. **纯 PHP 无缝降级**：当运行环境未开启 `ext-ffi` 或缺少对应平台动态库时，`DatasetHandle` 自动回退至 `$fallbackCandles`，`Backtester::run()` 与 `SweepRunner::sweep()` 保持与 C 内核一致的撮合与指标口径。
 3. **异步请求防竞态**：`QuantState::loadDataset(true)` 在 `App::go(...)` 协程中拉取线上 K 线时，通过递增序号 `$this->seq` 校验结果新鲜度，用户快速切换品种不会导致旧响应覆盖新状态。
+4. **真实历史替换而非合并**：`QuantState::syncHistory($days)` 经 `MarketFeed::fetchHistory()` 按 Binance `startTime` 翻页（每页 1000 根，可注入 `$fetchPage` 供无网测试），第一页到手后先 `CandleStore::clear()` 再逐页落盘，避免真实 K 线与内置合成基准（时间锚点与价位都不同）混在同一序列里。`MarketFeed::onlineSymbol()` 返回 `null` 的品种（`USDJPYz`）没有线上来源，只能导入本地数据。
+5. **排行榜只看样本内**：`QuantState::runSweep()` 在标准行情（`scaleMode === 'live'`，SQLite 根数与当前数据集一致，且前 70% ≥ 700 根、后 30% ≥ 300 根）下用 `CandleStore::loadSlice()` 切出两个临时 C SoA 数据集：网格排名只在前段上算，每行附 `oos`（同组参数在后段的表现），`sweep['oos']` 给出汇总；两个切片用完必须 `release()`（64 个槽位）。不满足条件时全段扫描、`sweep['oos'] === null`。`SweepRunner` 结果里的 `byId` 是全部组合（`rows` 只有前 40），仅供这次对照，存入状态前删掉。
 
 ---
 

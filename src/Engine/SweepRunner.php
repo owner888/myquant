@@ -242,6 +242,7 @@ final class SweepRunner
             'profitableCombos' => $profitableCount,
             'plateauCombos' => $plateauCount,
             'rows' => array_slice($rows, 0, 40),
+            'byId' => array_column($rows, null, 'id'), // 全部组合：样本外验证按参数组合对照排行榜的每一行
         ];
     }
 }

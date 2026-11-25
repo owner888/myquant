@@ -87,6 +87,32 @@ $importState = new QuantState($tmpDb);
 $importState->importLocalFile($tmpCsv);
 assertTrue($importState->barCount === 12_500 && str_starts_with($importState->importedFileName, 'myquant_test_12k_'), 'QuantState::importLocalFile streams 12.5k bars & records filename');
 
+// 3a. In-sample / out-of-sample: the leaderboard is picked on the first 70% of the stored bars, each row checked on the rest
+$oos = $importState->sweep['oos'] ?? null;
+assertTrue($oos !== null && $oos['trainBars'] === 8750 && $oos['testBars'] === 3750, 'A 12.5k-bar stored dataset sweeps on its first 70% and validates on the last 30%');
+$topRow = $importState->sweep['rows'][0];
+$sliceTest = $diskStore->loadSlice('forex', 'XAUUSDz', '15m', 8750, 3750);
+$sliceTrain = $diskStore->loadSlice('forex', 'XAUUSDz', '15m', 0, 8750);
+assertTrue($sliceTrain !== null && $sliceTrain->count === 8750 && $sliceTest !== null && $sliceTest->count === 3750, 'loadSlice cuts the stored bars in two by time');
+assertTrue($sliceTrain->lastCandle()->openTimeMs + 60_000 === 1770000000_000 + 8750 * 60_000 && $sliceTest->lastCandle()->openTimeMs === 1770000000_000 + 12_499 * 60_000, 'the slices meet at the split bar and end at the last one');
+$direct = Backtester::runOnDataset($sliceTest, $topRow['fast'], $topRow['slow'], $topRow['atrMult'], max(0.001, $importState->riskPct / 100.0), max(0.0, $importState->feeBps / 10000.0), 10000.0, 3.0, Backtester::DIR_LONG);
+assertClose($topRow['oos']['netReturnPct'], $direct['netReturnPct'], 1e-6, "A row's out-of-sample return is its parameters backtested on the last 30% alone");
+$inSampleOnly = SweepRunner::sweepOnDataset($sliceTrain, feeRate: max(0.0, $importState->feeBps / 10000.0), riskPct: max(0.001, $importState->riskPct / 100.0), maxLeverage: 3.0);
+assertTrue($inSampleOnly['rows'][0]['id'] === $topRow['id'], 'and the leaderboard is ranked on the first 70% alone');
+$sliceTrain->release();
+$sliceTest->release();
+for ($k = 0; $k < 80; $k++) { // more sweeps than the 64 C dataset slots: the two slices are released each time
+    $importState->runSweep();
+}
+assertTrue(($importState->sweep['oos']['testBars'] ?? 0) === 3750, 'Repeated sweeps release their train/test slices (no C slot leak)');
+$importState->tab = 'sweep';
+$oosH = new Headless(Content::file(__DIR__ . '/../view.php', $importState)->view, 1220, 820);
+$oosH->rt->strict = true;
+$oosH->frame(2);
+$oosTexts = implode("\n", $oosH->texts());
+assertTrue(str_contains($oosTexts, '样本外验证 (后 30%，3,750 根)') && str_contains($oosTexts, '仍盈利') || str_contains($oosTexts, '无盈利参数'), 'The sweep page shows the out-of-sample tile');
+assertTrue(substr_count($oosTexts, '样本外 ') >= count($importState->sweep['rows']), 'and each leaderboard row its out-of-sample result');
+
 $reloadedDs = $diskStore->loadDataset('forex', 'XAUUSDz', '15m');
 assertTrue($reloadedDs !== null && $reloadedDs->count === 12_500, 'Paged all 12,500 bars back from SQLite into C SoA');
 $reloadedDs->release();
@@ -94,10 +120,44 @@ $diskStore->close();
 @unlink($tmpCsv);
 @unlink($tmpDb);
 
+// 3b. Verify paged real-history fetch (Binance startTime paging, faked network) + replacing the synthetic seed in SQLite
+$stepMs = MarketFeed::intervalMs('15m');
+$asked = [];
+$fakePage = function (string $sym, string $iv, int $startMs, int $limit) use (&$asked, $stepMs): array {
+    $asked[] = [$sym, $startMs, $limit];
+    $n = count($asked) < 3 ? $limit : 240; // two full pages, then a short last one
+    $out = [];
+    for ($i = 0; $i < $n; $i++) {
+        $out[] = new Candle($startMs + $i * $stepMs, 4000.0, 4001.0, 3999.0, 4000.5, 10.0);
+    }
+    return $out;
+};
+$histStore = new CandleStore(':memory:');
+$histStore->save('forex', 'XAUUSDz', '15m', MarketFeed::syntheticDataset('forex', 'XAUUSDz', '15m', 650));
+$fromMs = 1790000000_000;
+$pagesSeen = [];
+$total = MarketFeed::fetchHistory('XAUUSDz', '15m', $fromMs, function (array $page, int $pageNo) use ($histStore, &$pagesSeen): bool {
+    if ($pageNo === 1) {
+        $histStore->clear('forex', 'XAUUSDz', '15m');
+    }
+    $histStore->save('forex', 'XAUUSDz', '15m', $page);
+    $pagesSeen[] = $pageNo;
+    return true;
+}, $fakePage);
+assertTrue($total === 2240 && $pagesSeen === [1, 2, 3], "fetchHistory pages until a short page (got $total bars)");
+assertTrue($asked[0] === ['PAXGUSDT', $fromMs, 1000] && $asked[1][1] === $fromMs + 1000 * $stepMs && $asked[2][1] === $fromMs + 2000 * $stepMs, 'each page starts one bar after the last of the page before, on the mapped Binance symbol');
+assertTrue($histStore->count('forex', 'XAUUSDz', '15m') === 2240, 'real history replaced the 650 synthetic seed bars instead of mixing with them');
+$asked = [];
+$stopped = MarketFeed::fetchHistory('XAUUSDz', '15m', $fromMs, fn(array $page, int $pageNo): bool => false, $fakePage);
+assertTrue($stopped === 1000, 'fetchHistory stops when the page handler returns false');
+assertTrue(MarketFeed::onlineSymbol('USDJPYz') === null && MarketFeed::historyPages('15m', 365) === 36 && MarketFeed::historyPages('1d', 30) === 1, 'no online source for USDJPYz; a year of 15m bars is 36 pages');
+$histStore->close();
+
 // 4. Verify standard startup, Live Incremental Stream (`mq_dataset_update_last`), and Direction Switching
 $state = new QuantState(':memory:');
 assertTrue($state->market === 'forex' && $state->symbol === 'XAUUSDz', 'Starts on Exness Gold XAUUSDz');
 assertTrue($state->barCount === 650, 'Uploaded 650 XAUUSDz bars to C SoA');
+assertTrue(array_key_exists('oos', $state->sweep) && $state->sweep['oos'] === null, '650 seed bars are too few to split: swept whole, no out-of-sample columns');
 
 $state->toggleStream(); // Runs immediate tick #1
 assertTrue($state->streaming === true && $state->streamTicks === 1, 'Live stream toggled ON');
@@ -112,6 +172,12 @@ assertTrue($state->streaming === false, 'Live stream toggled OFF');
 $h = new Headless(Content::file(__DIR__ . '/../view.php', $state)->view, 1220, 820);
 $h->rt->strict = true;
 $h->frame();
+
+assertTrue($h->byLabel('拉取真实历史') !== null || $h->byText('拉取真实历史') !== null, 'toolbar offers the real-history menu');
+$usdjpy = new QuantState(':memory:');
+$usdjpy->selectSymbol('USDJPYz');
+$usdjpy->syncHistory(365);
+assertTrue($usdjpy->syncing === false && str_contains($usdjpy->statusText, '没有线上行情来源'), 'syncHistory refuses a symbol with no online source');
 
 $h->clickText('多空双向');
 $h->frame();

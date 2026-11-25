@@ -45,6 +45,56 @@ final class MarketFeed
         };
     }
 
+    /** Binance 单次 K 线请求的上限。 */
+    public const PAGE_LIMIT = 1000;
+
+    /** 可选的历史回溯天数（工具栏「拉取历史」菜单）。 */
+    public const HISTORY_SPANS = [30 => '近 30 天', 90 => '近 90 天', 365 => '近 1 年', 1095 => '近 3 年'];
+
+    /** 线上行情所用的 Binance 现货交易对；没有线上来源的品种（USDJPYz）返回 null。 */
+    public static function onlineSymbol(string $symbol): ?string
+    {
+        return match ($symbol) {
+            'XAUUSDz' => 'PAXGUSDT',
+            'EURUSDz' => 'EURUSDT',
+            'USDJPYz' => null,
+            default => $symbol,
+        };
+    }
+
+    /** 回溯 $days 天需要的请求页数（每页 PAGE_LIMIT 根）。 */
+    public static function historyPages(string $interval, int $days): int
+    {
+        return (int)ceil($days * 86_400_000 / self::intervalMs($interval) / self::PAGE_LIMIT);
+    }
+
+    /**
+     * 从 $fromMs 起逐页拉取真实历史 K 线直到当前（Binance `startTime` 翻页，每页 PAGE_LIMIT 根），
+     * 每页交给 $onPage(list<Candle> $page, int $pageNo)；$onPage 返回 false 即中止（用户切换了品种）。
+     * $fetchPage(string $binanceSymbol, string $interval, int $startMs, int $limit): list<Candle> 供测试替换网络请求。
+     *
+     * @return int 拉到的 K 线总数
+     */
+    public static function fetchHistory(string $symbol, string $interval, int $fromMs, callable $onPage, ?callable $fetchPage = null): int
+    {
+        $binanceSymbol = self::onlineSymbol($symbol) ?? throw new RuntimeException("$symbol 没有线上行情来源，请导入本地数据");
+        $fetchPage ??= self::fetchKlines(...);
+        $stepMs = self::intervalMs($interval);
+        $total = 0;
+        for ($pageNo = 1, $start = $fromMs; ; $pageNo++) {
+            $page = $fetchPage($binanceSymbol, $interval, $start, self::PAGE_LIMIT);
+            if ($page === []) {
+                break;
+            }
+            $total += count($page);
+            if ($onPage($page, $pageNo) === false || count($page) < self::PAGE_LIMIT) {
+                break;
+            }
+            $start = $page[count($page) - 1]->openTimeMs + $stepMs;
+        }
+        return $total;
+    }
+
     /**
      * Fetches up to 1000 recent candles online (or limit=2 for lightweight live stream updates).
      *
@@ -52,27 +102,33 @@ final class MarketFeed
      */
     public static function fetchOnline(string $market, string $symbol, string $interval, int $limit = 800): array
     {
-        $binanceSymbol = match ($symbol) {
-            'XAUUSDz' => 'PAXGUSDT',
-            'EURUSDz' => 'EURUSDT',
-            default => $symbol,
-        };
-        if ($symbol === 'USDJPYz') {
+        $binanceSymbol = self::onlineSymbol($symbol);
+        if ($binanceSymbol === null) {
             return self::syntheticDataset($market, $symbol, $interval, max(2, $limit));
         }
+        return self::fetchKlines($binanceSymbol, $interval, null, $limit);
+    }
+
+    /**
+     * 一次 Binance K 线请求：最近 $limit 根，或给定 $startMs 时从该时刻起的 $limit 根。
+     *
+     * @return list<Candle>
+     */
+    private static function fetchKlines(string $binanceSymbol, string $interval, ?int $startMs, int $limit): array
+    {
         $url = sprintf(
             'https://api.binance.com/api/v3/klines?symbol=%s&interval=%s&limit=%d',
             rawurlencode($binanceSymbol),
             rawurlencode($interval),
-            min(1000, max(2, $limit))
-        );
+            min(self::PAGE_LIMIT, max(2, $limit))
+        ) . ($startMs !== null ? '&startTime=' . $startMs : '');
         [$body, $resp] = URLSession::shared()->data(for: new URLRequest($url));
         if ($resp->statusCode < 200 || $resp->statusCode >= 300) {
-            throw new RuntimeException("HTTP {$resp->statusCode} fetching $symbol ($interval)");
+            throw new RuntimeException("HTTP {$resp->statusCode} fetching $binanceSymbol ($interval)");
         }
         $raw = json_decode($body, true);
-        if (!is_array($raw) || $raw === []) {
-            throw new RuntimeException("Empty candle payload for $symbol");
+        if (!is_array($raw) || ($raw === [] && $startMs === null)) { // 翻页时空页即到头
+            throw new RuntimeException("Empty candle payload for $binanceSymbol");
         }
         $candles = [];
         foreach ($raw as $row) {
