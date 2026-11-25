@@ -29,8 +29,3 @@ if (!class_exists(\MyPHP\App::class)) {
     }
     require_once $framework . '/src/autoload.php';
 }
-
-// 默认使用 MyPHP 自带的纯 PHP 网络栈（stream_select + Fiber，HTTP/2），不依赖系统事件通知（MYPHP_HTTP=curl 可切回 libcurl）。
-if (getenv('MYPHP_HTTP') !== 'curl') {
-    \MyPHP\Http::useTransport('php');
-}

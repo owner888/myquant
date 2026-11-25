@@ -3,7 +3,7 @@
     "displayName": "MyQuant — 跨市场量化工作台",
     "identifier": "com.owner888.myquant",
     "version": "0.2.0",
-    "myphp": "1.205.7",
+    "myphp": "1.205.8",
     "entry": "app.php",
     "out": "build",
     "exclude": [
