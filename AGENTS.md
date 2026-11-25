@@ -112,3 +112,35 @@ php -d ffi.enable=1 tests/ui_test.php
 # 必须保证 strict 模式下的桌面与平板 Headless 测试 0 失败
 php -d ffi.enable=1 tests/ui_test.php
 ```
+
+### 每新增功能或修改跨端 UI / 内核后的四端标准验收流程
+
+每次新增功能或改动跨平台交互后，Coding Agent 应按以下顺序完成四端回归，不手跑底层 `xcrun` / `adb` 脚本：
+
+1. **通用无头回归（`< 100ms`，每次必跑）**
+   - 对所有改动 PHP 文件执行 `php -l`，再运行 `php -d ffi.enable=1 tests/ui_test.php`（同时覆盖桌面端与平板端 `strict` Key 检查、FFI 版本校验、100 万根 K 线 SoA 堆增量 `< 1MB` 及无 FFI 纯 PHP 降级）。
+2. **macOS（Metal + 毛玻璃侧边栏）**
+   - 桌面与移动视口截图走查：
+     ```bash
+     ./vendor/bin/myphp screenshot -size 1280x800 -theme dark -out /tmp/myquant-macos.png .
+     ./vendor/bin/myphp screenshot -size 402x874 -theme light -out /tmp/myquant-mobile.png .
+     ```
+   - 热重载或打包校验：`./vendor/bin/myphp run -d macos .`、`./vendor/bin/myphp build -platform darwin/arm64 .`。
+3. **Windows（本地 Windows VM，通过免密 SSH 别名如 `ssh win` 联调）**
+   - **为什么在 Windows 内原生编译与截图**：`myphp build` 的 Windows 产物需直接携带宿主 Windows 的 `php.exe` 与 `ext/*.dll`，并调用本地 C 编译器（`gcc` / `clang` / `cl`）生成无控制台 GUI 启动器 `MyQuant.exe`，不支持从 macOS 交叉打包整个 Windows 应用。因此在装有 PHP 8.4/8.5（开启 `ffi`、`sqlite3`、`pdo_sqlite`、`curl`、`mbstring`、`openssl`）与轻量 MinGW/LLVM-MinGW 的 Windows VM 内完成编译、测试与截图。
+   - **代码同步与 SSH 无头测试 / 打包**：将宿主改动同步至 VM 工作目录后执行：
+     ```bash
+     ssh win "cd %USERPROFILE%\myquant && php -d ffi.enable=1 tests\ui_test.php"
+     ssh win "cd %USERPROFILE%\myquant && ..\myphp\bin\myphp.cmd build -skip-installer ."
+     ```
+   - **D3D11 + Win11 Mica 真实窗口截图回传**：OpenSSH 会话默认位于后台非交互会话（Session 0），无法直接访问桌面 DWM；通过计划任务 `/IT` 在已登录交互桌面触发 `myphp.cmd screenshot`，再拉回宿主机做视觉检查：
+     ```bash
+     ssh win "schtasks /Create /TN MyQuantShot /TR \"cmd /c cd /d %USERPROFILE%\myquant && ..\myphp\bin\myphp.cmd screenshot -size 1280x800 -theme dark -out C:\Windows\Temp\myquant-win.png .\" /SC ONCE /ST 00:00 /IT /RL HIGHEST /F && schtasks /Run /TN MyQuantShot"
+     scp win:C:/Windows/Temp/myquant-win.png /tmp/myquant-win.png
+     ```
+4. **iOS / iPadOS（Metal + UIKit 安全区与自适应导航）**
+   - 查看可用设备：`./vendor/bin/myphp devices`（首次跑模拟器前确保宿主已安装 `autoconf automake libtool pkg-config bison re2c` 以构建模拟器 `libphp.a`）。
+   - 启动并检查日志：`./vendor/bin/myphp run -d ios .`，重点验证灵动岛/底部安全区、横竖屏旋转及 iPad 横屏侧边栏 ↔ 竖屏顶部悬浮胶囊栏变形；发版构建校验：`./vendor/bin/myphp build -platform ios/arm64 .`。
+5. **Android（EGL / GLES 3 + 16KB 页对齐与 Enforcing SELinux）**
+   - 启动 `SELinux = Enforcing` 标准镜像模拟器（`./vendor/bin/myphp emulators --launch <id>`）或连接非 root 真机。
+   - 安装运行并流式检查日志：`./vendor/bin/myphp run -d android .`（确认无 `avc: denied` 或 PHP 告警）；发版构建校验：`./vendor/bin/myphp build -platform android/arm64 .`（若附带 `android/jniLibs/arm64-v8a/libquant_sweep.so`，编译时必须传入 `-Wl,-z,max-page-size=16384`）。

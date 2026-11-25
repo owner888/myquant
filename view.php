@@ -59,18 +59,27 @@ $scalePicker = fn() => Picker('规模', selection: $scaleBinding)(
     Text('100万根 SoA')->tag('1m'),
 )->pickerStyle(PickerStyle::segmented);
 
-$scopeBar = fn() => VStack(alignment: HorizontalAlignment::leading, spacing: 10)(
-    HStack(alignment: VerticalAlignment::center, spacing: 12)(
+$isCompact = fn(): bool => \MyPHP\Device::isMobile() || ($this->window !== null && $this->window->size()[0] < 720);
+
+$scopeBar = fn() => $isCompact()
+    ? VStack(alignment: HorizontalAlignment::leading, spacing: 8)(
         $marketPicker(),
-        Spacer(),
         $scalePicker(),
-    ),
-    HStack(alignment: VerticalAlignment::center, spacing: 12)(
         $symbolPicker(),
-        Spacer(),
         $intervalPicker(),
-    ),
-);
+    )
+    : VStack(alignment: HorizontalAlignment::leading, spacing: 10)(
+        HStack(alignment: VerticalAlignment::center, spacing: 12)(
+            $marketPicker(),
+            Spacer(),
+            $scalePicker(),
+        ),
+        HStack(alignment: VerticalAlignment::center, spacing: 12)(
+            $symbolPicker(),
+            Spacer(),
+            $intervalPicker(),
+        ),
+    );
 
 $syncToolbar = fn() => [
     Button(
@@ -80,7 +89,8 @@ $syncToolbar = fn() => [
     )->disabled($this->syncing),
 ];
 
-$labPage = function () use ($card, $metricTile, $scopeBar, $syncToolbar, $accent, $green, $cyan, $amber, $red): View {
+$labPage = function () use ($isCompact, $card, $metricTile, $scopeBar, $syncToolbar, $accent, $green, $cyan, $amber, $red): View {
+    $isPhone = $isCompact();
     $r = $this->report;
     $lod = $this->lodView;
     $ret = (float)($r['netReturnPct'] ?? 0.0);
@@ -129,19 +139,32 @@ $labPage = function () use ($card, $metricTile, $scopeBar, $syncToolbar, $accent
                 ),
             ),
             $card(
-                HStack(alignment: VerticalAlignment::firstTextBaseline)(
-                    Text(verbatim: sprintf('C 原生 LOD 金字塔行情视野 (%s 根 K 线)', number_format($this->barCount)))->font(Font::headline),
-                    Spacer(),
-                    Text(verbatim: sprintf(
-                        'O(log N) 极值 [%.2f .. %.2f] · %d 桶 · 查询 %.1f µs · C %.1f MB / PHP %.1f MB',
-                        $lodLow,
-                        $lodHigh,
-                        (int)($lod['buckets'] ?? 0),
-                        (float)($lod['elapsedUs'] ?? 0.0),
-                        $this->cMemoryMb,
-                        $this->phpMemoryMb,
-                    ))->font(Font::caption)->foregroundStyle(Color::secondary),
-                ),
+                $isPhone
+                    ? VStack(alignment: HorizontalAlignment::leading, spacing: 4)(
+                        Text(verbatim: sprintf('C 原生 LOD 金字塔行情视野 (%s 根 K 线)', number_format($this->barCount)))->font(Font::headline),
+                        Text(verbatim: sprintf(
+                            'O(log N) [%.2f .. %.2f] · %d 桶 · %.1f µs · C %.1f MB / PHP %.1f MB',
+                            $lodLow,
+                            $lodHigh,
+                            (int)($lod['buckets'] ?? 0),
+                            (float)($lod['elapsedUs'] ?? 0.0),
+                            $this->cMemoryMb,
+                            $this->phpMemoryMb,
+                        ))->font(Font::caption)->foregroundStyle(Color::secondary),
+                    )
+                    : HStack(alignment: VerticalAlignment::firstTextBaseline)(
+                        Text(verbatim: sprintf('C 原生 LOD 金字塔行情视野 (%s 根 K 线)', number_format($this->barCount)))->font(Font::headline),
+                        Spacer(),
+                        Text(verbatim: sprintf(
+                            'O(log N) 极值 [%.2f .. %.2f] · %d 桶 · 查询 %.1f µs · C %.1f MB / PHP %.1f MB',
+                            $lodLow,
+                            $lodHigh,
+                            (int)($lod['buckets'] ?? 0),
+                            (float)($lod['elapsedUs'] ?? 0.0),
+                            $this->cMemoryMb,
+                            $this->phpMemoryMb,
+                        ))->font(Font::caption)->foregroundStyle(Color::secondary),
+                    ),
                 Chart()(
                     LinePlot(x: $lod['xs'] ?? [0.0, 1.0], y: $lod['closes'] ?? [1.0, 1.0])
                         ->foregroundStyle($cyan),
@@ -163,12 +186,18 @@ $labPage = function () use ($card, $metricTile, $scopeBar, $syncToolbar, $accent
                 ),
             ),
             $card(
-                HStack(alignment: VerticalAlignment::firstTextBaseline)(
-                    Text('策略净值曲线（绿） vs 买死不动基准（灰）')->font(Font::headline),
-                    Spacer(),
-                    Text(verbatim: sprintf('Fast %.0f / Slow %.0f / ATR %.1fx · 单笔风险 %.1f%% · 摩擦 %.1f bps', $this->fastEma, $this->slowEma, $this->atrMult, $this->riskPct, $this->feeBps))
-                        ->font(Font::caption)->foregroundStyle(Color::secondary),
-                ),
+                $isPhone
+                    ? VStack(alignment: HorizontalAlignment::leading, spacing: 4)(
+                        Text('策略净值曲线（绿） vs 买死不动基准（灰）')->font(Font::headline),
+                        Text(verbatim: sprintf('Fast %.0f / Slow %.0f / ATR %.1fx · 单笔风险 %.1f%% · 摩擦 %.1f bps', $this->fastEma, $this->slowEma, $this->atrMult, $this->riskPct, $this->feeBps))
+                            ->font(Font::caption)->foregroundStyle(Color::secondary),
+                    )
+                    : HStack(alignment: VerticalAlignment::firstTextBaseline)(
+                        Text('策略净值曲线（绿） vs 买死不动基准（灰）')->font(Font::headline),
+                        Spacer(),
+                        Text(verbatim: sprintf('Fast %.0f / Slow %.0f / ATR %.1fx · 单笔风险 %.1f%% · 摩擦 %.1f bps', $this->fastEma, $this->slowEma, $this->atrMult, $this->riskPct, $this->feeBps))
+                            ->font(Font::caption)->foregroundStyle(Color::secondary),
+                    ),
                 Chart()(
                     LinePlot(x: $r['xs'] ?? [0.0, 1.0], y: $r['holdYs'] ?? [10000.0, 10000.0])
                         ->foregroundStyle(Color::secondary->opacity(0.55)),

@@ -3,6 +3,12 @@
 
 #include <stdint.h>
 
+#ifdef _WIN32
+#define MQ_EXPORT __declspec(dllexport)
+#else
+#define MQ_EXPORT
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -13,12 +19,12 @@ extern "C" {
 #define MQ_TRADE_STRIDE 8
 #define MQ_ATR_PERIOD 14
 
-int mq_sweep_version(void);
-int mq_cpu_threads(void);
+MQ_EXPORT int mq_sweep_version(void);
+MQ_EXPORT int mq_cpu_threads(void);
 
 /* ---- Columnar SoA Dataset + Binary OHLC LOD Pyramid ---- */
 
-int mq_dataset_alloc(
+MQ_EXPORT int mq_dataset_alloc(
     const int64_t *open_time_ms,
     const double *opens,
     const double *highs,
@@ -28,7 +34,7 @@ int mq_dataset_alloc(
     int n_candles
 );
 
-int mq_dataset_generate_mock(
+MQ_EXPORT int mq_dataset_generate_mock(
     int n_candles,
     double base_price,
     double bar_volatility,
@@ -37,11 +43,11 @@ int mq_dataset_generate_mock(
     uint64_t seed
 );
 
-void mq_dataset_free(int ds_id);
-int mq_dataset_count(int ds_id);
-int64_t mq_dataset_memory_bytes(int ds_id);
+MQ_EXPORT void mq_dataset_free(int ds_id);
+MQ_EXPORT int mq_dataset_count(int ds_id);
+MQ_EXPORT int64_t mq_dataset_memory_bytes(int ds_id);
 
-int mq_dataset_update_last(
+MQ_EXPORT int mq_dataset_update_last(
     int ds_id,
     int64_t open_time_ms,
     double open,
@@ -52,7 +58,7 @@ int mq_dataset_update_last(
 );
 
 /* O(log N) viewport query over the binary LOD pyramid: returns <= max_out buckets */
-int mq_dataset_query_lod(
+MQ_EXPORT int mq_dataset_query_lod(
     int ds_id,
     int from_idx,
     int to_idx,
@@ -66,7 +72,7 @@ int mq_dataset_query_lod(
 
 /* ---- Zero-Copy Backtest & Multi-Threaded Grid Sweep on Resident SoA Dataset ---- */
 
-int mq_backtest_on_dataset(
+MQ_EXPORT int mq_backtest_on_dataset(
     int ds_id,
     int fast_period,
     int slow_period,
@@ -85,7 +91,7 @@ int mq_backtest_on_dataset(
     int max_trades
 );
 
-int mq_sweep_on_dataset(
+MQ_EXPORT int mq_sweep_on_dataset(
     int ds_id,
     const int *fast_list,
     int n_fast,
@@ -103,7 +109,7 @@ int mq_sweep_on_dataset(
 );
 
 /* Legacy raw-array entry point kept for backwards compatibility */
-int mq_sweep_ema_atr(
+MQ_EXPORT int mq_sweep_ema_atr(
     const double *highs,
     const double *lows,
     const double *closes,

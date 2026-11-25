@@ -47,6 +47,32 @@ build_target() {
             fi
             echo "built $out_dir/quant_sweep.dll"
             ;;
+        windows-arm64)
+            if command -v zig >/dev/null 2>&1; then
+                zig cc -target aarch64-windows-gnu -O3 -shared "$SRC" -o "$out_dir/quant_sweep.dll"
+            elif command -v aarch64-w64-mingw32-gcc >/dev/null 2>&1; then
+                aarch64-w64-mingw32-gcc -O3 -shared "$SRC" -o "$out_dir/quant_sweep.dll"
+            else
+                cl /O2 /LD "$SRC" /Fe:"$out_dir/quant_sweep.dll"
+            fi
+            echo "built $out_dir/quant_sweep.dll"
+            ;;
+        android-arm64)
+            local jni_dir="$ROOT/android/jniLibs/arm64-v8a"
+            mkdir -p "$jni_dir"
+            local ndk_dir="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
+            if [[ -z "$ndk_dir" ]]; then
+                ndk_dir="$(ls -1d "${HOME}/Library/Android/sdk/ndk/"* "${ANDROID_HOME:-/nonexistent}/ndk/"* 2>/dev/null | sort -V | tail -n 1)"
+            fi
+            local tc="$ndk_dir/toolchains/llvm/prebuilt/darwin-x86_64"
+            [[ -d "$tc" ]] || tc="$ndk_dir/toolchains/llvm/prebuilt/linux-x86_64"
+            "$tc/bin/aarch64-linux-android31-clang" -O3 -fno-math-errno -shared -fPIC \
+                -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384 \
+                "$SRC" -lm -o "$jni_dir/libquant_sweep.so"
+            "$tc/bin/llvm-strip" --strip-unneeded "$jni_dir/libquant_sweep.so"
+            rmdir "$out_dir" 2>/dev/null || true
+            echo "built $jni_dir/libquant_sweep.so (16KB page-aligned)"
+            ;;
         *)
             echo "Unsupported target: $target" >&2
             exit 1

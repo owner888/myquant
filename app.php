@@ -17,7 +17,7 @@ if (($initTab = getenv('MYQUANT_TAB')) && is_string($initTab)) {
 }
 
 App::whenReady(function () use ($state): void {
-    [$w, $h] = Device::isDesktop() ? [1180, 780] : [402, 874];
+    [$w, $h] = Device::isDesktop() ? [1180, 780] : (Device::isPad() ? [1100, 820] : [402, 874]);
     $desktop = Device::isDesktop();
     $macDesktop = PHP_OS_FAMILY === 'Darwin' && $desktop;
     $state->window = new Window(new WindowOptions(

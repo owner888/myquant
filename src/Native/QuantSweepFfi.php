@@ -18,8 +18,8 @@ final class QuantSweepFfi
     public const LIBRARY = 'quant_sweep';
 
     public const CDEF = 'int mq_sweep_version(void);
-int mq_cpu_threads(void);
-int mq_dataset_alloc(
+ int mq_cpu_threads(void);
+ int mq_dataset_alloc(
  const int64_t *open_time_ms,
  const double *opens,
  const double *highs,
@@ -28,7 +28,7 @@ int mq_dataset_alloc(
  const double *volumes,
  int n_candles
 );
-int mq_dataset_generate_mock(
+ int mq_dataset_generate_mock(
  int n_candles,
  double base_price,
  double bar_volatility,
@@ -36,10 +36,10 @@ int mq_dataset_generate_mock(
  int64_t step_ms,
  uint64_t seed
 );
-void mq_dataset_free(int ds_id);
-int mq_dataset_count(int ds_id);
-int64_t mq_dataset_memory_bytes(int ds_id);
-int mq_dataset_update_last(
+ void mq_dataset_free(int ds_id);
+ int mq_dataset_count(int ds_id);
+ int64_t mq_dataset_memory_bytes(int ds_id);
+ int mq_dataset_update_last(
  int ds_id,
  int64_t open_time_ms,
  double open,
@@ -48,7 +48,7 @@ int mq_dataset_update_last(
  double close,
  double volume
 );
-int mq_dataset_query_lod(
+ int mq_dataset_query_lod(
  int ds_id,
  int from_idx,
  int to_idx,
@@ -59,7 +59,7 @@ int mq_dataset_query_lod(
  double *out_lows,
  double *out_extremes
 );
-int mq_backtest_on_dataset(
+ int mq_backtest_on_dataset(
  int ds_id,
  int fast_period,
  int slow_period,
@@ -77,7 +77,7 @@ int mq_backtest_on_dataset(
  double *out_trades,
  int max_trades
 );
-int mq_sweep_on_dataset(
+ int mq_sweep_on_dataset(
  int ds_id,
  const int *fast_list,
  int n_fast,
@@ -93,7 +93,7 @@ int mq_sweep_on_dataset(
  double *out_metrics,
  int max_combos
 );
-int mq_sweep_ema_atr(
+ int mq_sweep_ema_atr(
  const double *highs,
  const double *lows,
  const double *closes,
