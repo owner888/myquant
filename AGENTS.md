@@ -87,6 +87,7 @@ native/quant_sweep.c (g_datasets[64] 常驻 C 侧列式数组 + Wilder ATR(14) �
 
 1. **`boot.php` 加载优先级**
    - 先注册内置 `MyQuant\` -> `src/` 的轻量 PSR-4 自动加载器；项目若有其他 Composer 包，再加载 `vendor/autoload.php`。
+- **纯 PHP 网络栈默认开启**：`boot.php` 默认调用 `Http::useTransport('php')`（`stream_select` + Fiber + HTTP/2 连接池 + gzip 解压，不依赖 `CFFileDescriptor` / GLib 等系统事件通知；设 `MYPHP_HTTP=curl` 可切回 libcurl），`myphp.json` 要求 `"myphp": "1.205.7"`。
    - **MyPHP 不是项目的 Composer 依赖**，像 Flutter SDK 一样全局安装、`myphp upgrade` 一次升级所有项目。框架加载顺序：`./myphp`（打包独立产物） → `$MYPHP_HOME`（`myphp dev / run / test / screenshot` 自动设为命令自己那份） → `myphp.json` 中的 `framework` 配置；都没有就抛错。`myphp.json` 的 `"myphp"` 是项目需要的最低框架版本，不满足时 `myphp` 命令会提示 `myphp upgrade`。不要把 `owner888/myphp` 加回 `composer.json`，也不要直接 `php tests/ui_test.php`（用 `myphp test`）。
 2. **`view.php` 跨端布局规范**
    - 顶层采用 `TabView(...)->tabViewStyle(TabViewStyle::sidebarAdaptable)`，不要手写自定义侧边栏替代系统自适应导航，以保持 macOS 毛玻璃侧边栏、Windows 11 Mica 侧边栏、iPadOS/Android Pad 横屏收起侧边栏自动变形为悬浮胶囊栏的原生行为。

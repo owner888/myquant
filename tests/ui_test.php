@@ -28,7 +28,8 @@ function assertClose(float $a, float $b, float $eps, string $msg): void
     }
 }
 
-// 1. Verify v3 C SoA + LOD + Multi-threaded FFI library
+// 1. Verify v3 C SoA + LOD + Multi-threaded FFI library & pure-PHP HTTP/2 network transport
+assertTrue(\MyPHP\Http::transport() === 'php', 'MyQuant defaults to MyPHP pure-PHP network stack (stream_select + Fiber, HTTP/2)');
 assertTrue(QuantSweepFfi::available(), 'QuantSweepFfi native C library should be available');
 assertTrue(QuantSweepFfi::mq_sweep_version() === 3, 'mq_sweep_version() === 3');
 assertTrue(QuantSweepFfi::mq_cpu_threads() >= 1, 'mq_cpu_threads() >= 1');
