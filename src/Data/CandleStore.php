@@ -230,6 +230,18 @@ final class CandleStore
     }
 
     /**
+     * 把暂存键 $fromInterval 下的全部 K 线换成 $toInterval 的行情：先删后者原有的，再改键，同一事务内完成
+     * （历史拉取全部成功后才替换正式数据）。
+     */
+    public function promote(string $market, string $symbol, string $fromInterval, string $toInterval): void
+    {
+        $this->conn()->transaction([
+            new Statement('DELETE FROM candles WHERE market = ? AND symbol = ? AND interval = ?', [$market, $symbol, $toInterval]),
+            new Statement('UPDATE candles SET interval = ? WHERE market = ? AND symbol = ? AND interval = ?', [$toInterval, $market, $symbol, $fromInterval]),
+        ]);
+    }
+
+    /**
      * @param list<Candle> $candles
      */
     public function save(string $market, string $symbol, string $interval, array $candles): void

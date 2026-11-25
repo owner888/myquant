@@ -3,7 +3,7 @@ declare(strict_types=1);
 
 namespace MyQuant\Data;
 
-use MyPHP\{URLRequest, URLSession};
+use MyPHP\{App, URLRequest, URLSession};
 use RuntimeException;
 use ZipArchive;
 
@@ -49,7 +49,7 @@ final class MarketFeed
     public const PAGE_LIMIT = 1000;
 
     /** 可选的历史回溯天数（工具栏「拉取历史」菜单）。 */
-    public const HISTORY_SPANS = [30 => '近 30 天', 90 => '近 90 天', 365 => '近 1 年', 1095 => '近 3 年'];
+    public const HISTORY_SPANS = [30 => '近 30 天', 90 => '近 90 天', 365 => '近 1 年', 1095 => '近 3 年', 1825 => '近 5 年'];
 
     /** 线上行情所用的 Binance 现货交易对；没有线上来源的品种（USDJPYz）返回 null。 */
     public static function onlineSymbol(string $symbol): ?string
@@ -68,29 +68,75 @@ final class MarketFeed
         return (int)ceil($days * 86_400_000 / self::intervalMs($interval) / self::PAGE_LIMIT);
     }
 
+    /** 历史拉取同时进行的请求数。Binance 每个 K 线请求权重 2、限额每分钟 6000：8 路并发远低于限额。 */
+    public const HISTORY_CONCURRENCY = 8;
+    /** 单个 K 线请求的超时秒数：一页约 160 KB，正常不到 1 秒；连接偶尔会卡在握手上，超时后由重试接手。 */
+    private const REQUEST_TIMEOUT = 15.0;
+    /** 每个窗口最多请求的次数。 */
+    private const PAGE_ATTEMPTS = 3;
+
     /**
-     * 从 $fromMs 起逐页拉取真实历史 K 线直到当前（Binance `startTime` 翻页，每页 PAGE_LIMIT 根），
-     * 每页交给 $onPage(list<Candle> $page, int $pageNo)；$onPage 返回 false 即中止（用户切换了品种）。
-     * $fetchPage(string $binanceSymbol, string $interval, int $startMs, int $limit): list<Candle> 供测试替换网络请求。
+     * 拉取 [$fromMs, $toMs) 的真实历史 K 线：把时间段切成每段 PAGE_LIMIT 根的窗口（Binance `startTime` + `endTime`），
+     * 由 $concurrency 个协程各自领取窗口同时请求（应用运行时请求在 curl multi 上并行；无事件循环的脚本/测试里退化为逐个执行，
+     * 结果相同）。窗口互不重叠，到达顺序不定：每个非空窗口交给 $onPage(list<Candle> $page, int $done, int $pages)，
+     * $done 是已完成的窗口数；$onPage 返回 false 即中止（用户切换了品种），不再领取新窗口。上市前的窗口为空，直接跳过。
+     * 某个窗口连续 PAGE_ATTEMPTS 次请求失败则停止领取，等在途请求结束后抛出第一个错误。
+     * $fetchPage(string $binanceSymbol, string $interval, int $startMs, int $endMs, int $limit): list<Candle> 供测试替换网络请求。
      *
      * @return int 拉到的 K 线总数
      */
-    public static function fetchHistory(string $symbol, string $interval, int $fromMs, callable $onPage, ?callable $fetchPage = null): int
+    public static function fetchHistory(string $symbol, string $interval, int $fromMs, int $toMs, callable $onPage, ?callable $fetchPage = null, int $concurrency = self::HISTORY_CONCURRENCY): int
     {
         $binanceSymbol = self::onlineSymbol($symbol) ?? throw new RuntimeException("$symbol 没有线上行情来源，请导入本地数据");
         $fetchPage ??= self::fetchKlines(...);
-        $stepMs = self::intervalMs($interval);
+        $spanMs = self::intervalMs($interval) * self::PAGE_LIMIT;
+        $pages = max(1, (int)ceil(($toMs - $fromMs) / $spanMs));
+        $next = 0;      // 下一个待领取的窗口
+        $done = 0;      // 已完成的窗口数
         $total = 0;
-        for ($pageNo = 1, $start = $fromMs; ; $pageNo++) {
-            $page = $fetchPage($binanceSymbol, $interval, $start, self::PAGE_LIMIT);
-            if ($page === []) {
-                break;
+        $running = 0;   // 仍在工作的协程数
+        $error = null;
+        $stopped = false;
+        $worker = function () use (&$next, &$done, &$total, &$running, &$error, &$stopped, $pages, $fromMs, $toMs, $spanMs, $binanceSymbol, $interval, $fetchPage, $onPage): void {
+            try {
+                while (!$stopped && $error === null && $next < $pages) {
+                    $start = $fromMs + $next++ * $spanMs;
+                    for ($attempt = 1; ; $attempt++) { // 偶发的网络错误重试，否则一页失败整次拉取作废
+                        try {
+                            $page = $fetchPage($binanceSymbol, $interval, $start, min($toMs, $start + $spanMs) - 1, self::PAGE_LIMIT);
+                            break;
+                        } catch (\Throwable $e) {
+                            if ($attempt >= self::PAGE_ATTEMPTS || $stopped || $error !== null) {
+                                throw $e;
+                            }
+                            App::sleep(0.25 * $attempt);
+                        }
+                    }
+                    $done++;
+                    if ($stopped || $error !== null) {
+                        return; // 在途请求回来时已中止或已出错：丢弃
+                    }
+                    $total += count($page);
+                    if ($page !== [] && $onPage($page, $done, $pages) === false) {
+                        $stopped = true;
+                    }
+                }
+            } catch (\Throwable $e) {
+                $error ??= $e;
+            } finally {
+                $running--;
             }
-            $total += count($page);
-            if ($onPage($page, $pageNo) === false || count($page) < self::PAGE_LIMIT) {
-                break;
-            }
-            $start = $page[count($page) - 1]->openTimeMs + $stepMs;
+        };
+        $running = App::running() ? max(1, min($concurrency, $pages)) : 1; // 没有事件循环时协程无法并行等待网络：只用调用方这一路
+        for ($i = 1; $i < $running; $i++) {
+            App::go($worker); // 各自跑到第一次等待网络为止
+        }
+        $worker(); // 调用方自己也是一路
+        while ($running > 0) {
+            App::sleep(0.01); // 等其余协程的在途请求结束
+        }
+        if ($error !== null) {
+            throw $error;
         }
         return $total;
     }
@@ -106,28 +152,28 @@ final class MarketFeed
         if ($binanceSymbol === null) {
             return self::syntheticDataset($market, $symbol, $interval, max(2, $limit));
         }
-        return self::fetchKlines($binanceSymbol, $interval, null, $limit);
+        return self::fetchKlines($binanceSymbol, $interval, null, null, $limit);
     }
 
     /**
-     * 一次 Binance K 线请求：最近 $limit 根，或给定 $startMs 时从该时刻起的 $limit 根。
+     * 一次 Binance K 线请求：最近 $limit 根，或给定 $startMs（及 $endMs）时该时间窗口内从头起的 $limit 根。
      *
      * @return list<Candle>
      */
-    private static function fetchKlines(string $binanceSymbol, string $interval, ?int $startMs, int $limit): array
+    private static function fetchKlines(string $binanceSymbol, string $interval, ?int $startMs, ?int $endMs, int $limit): array
     {
         $url = sprintf(
             'https://api.binance.com/api/v3/klines?symbol=%s&interval=%s&limit=%d',
             rawurlencode($binanceSymbol),
             rawurlencode($interval),
             min(self::PAGE_LIMIT, max(2, $limit))
-        ) . ($startMs !== null ? '&startTime=' . $startMs : '');
-        [$body, $resp] = URLSession::shared()->data(for: new URLRequest($url));
+        ) . ($startMs !== null ? '&startTime=' . $startMs : '') . ($endMs !== null ? '&endTime=' . $endMs : '');
+        [$body, $resp] = URLSession::shared()->data(for: new URLRequest($url, timeoutInterval: self::REQUEST_TIMEOUT));
         if ($resp->statusCode < 200 || $resp->statusCode >= 300) {
             throw new RuntimeException("HTTP {$resp->statusCode} fetching $binanceSymbol ($interval)");
         }
         $raw = json_decode($body, true);
-        if (!is_array($raw) || ($raw === [] && $startMs === null)) { // 翻页时空页即到头
+        if (!is_array($raw) || ($raw === [] && $startMs === null)) { // 历史窗口可以为空（上市之前）
             throw new RuntimeException("Empty candle payload for $binanceSymbol");
         }
         $candles = [];

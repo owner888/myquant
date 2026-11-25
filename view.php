@@ -154,7 +154,7 @@ $syncToolbar = function () use ($isCompact): array {
         )->disabled($this->syncing),
         Menu($compact ? '历史' : '拉取真实历史', systemImage: 'clock.arrow.circlepath')(
             Each(MarketFeed::HISTORY_SPANS)(fn(string $label, int $days) => Button(
-                sprintf('%s（约 %d 页）', $label, MarketFeed::historyPages($this->interval, $days)),
+                sprintf('%s（%d 页）', $label, MarketFeed::historyPages($this->interval, $days)),
                 action: fn() => $this->syncHistory($days),
             )),
         )->disabled($this->syncing),

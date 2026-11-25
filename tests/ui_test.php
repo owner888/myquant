@@ -120,36 +120,56 @@ $diskStore->close();
 @unlink($tmpCsv);
 @unlink($tmpDb);
 
-// 3b. Verify paged real-history fetch (Binance startTime paging, faked network) + replacing the synthetic seed in SQLite
+// 3b. Verify windowed real-history fetch (Binance startTime/endTime windows, faked network), staged and swapped in whole
 $stepMs = MarketFeed::intervalMs('15m');
+$spanMs = $stepMs * MarketFeed::PAGE_LIMIT;
+$fromMs = 1790000000_000;
+$toMs = $fromMs + 2 * $spanMs + 240 * $stepMs; // two full windows and a short last one
 $asked = [];
-$fakePage = function (string $sym, string $iv, int $startMs, int $limit) use (&$asked, $stepMs): array {
-    $asked[] = [$sym, $startMs, $limit];
-    $n = count($asked) < 3 ? $limit : 240; // two full pages, then a short last one
+$fails = 0;
+$fakePage = function (string $sym, string $iv, int $startMs, int $endMs, int $limit) use (&$asked, &$fails, $stepMs, $fromMs, $spanMs): array {
+    $asked[] = [$sym, $startMs, $endMs, $limit];
+    if ($fails > 0) {
+        $fails--;
+        throw new RuntimeException('HTTP 502');
+    }
+    if ($startMs < $fromMs + $spanMs) {
+        return []; // before the listing: an empty window is skipped, not the end
+    }
     $out = [];
-    for ($i = 0; $i < $n; $i++) {
-        $out[] = new Candle($startMs + $i * $stepMs, 4000.0, 4001.0, 3999.0, 4000.5, 10.0);
+    for ($t = $startMs; $t <= $endMs; $t += $stepMs) {
+        $out[] = new Candle($t, 4000.0, 4001.0, 3999.0, 4000.5, 10.0);
     }
     return $out;
 };
 $histStore = new CandleStore(':memory:');
 $histStore->save('forex', 'XAUUSDz', '15m', MarketFeed::syntheticDataset('forex', 'XAUUSDz', '15m', 650));
-$fromMs = 1790000000_000;
-$pagesSeen = [];
-$total = MarketFeed::fetchHistory('XAUUSDz', '15m', $fromMs, function (array $page, int $pageNo) use ($histStore, &$pagesSeen): bool {
-    if ($pageNo === 1) {
-        $histStore->clear('forex', 'XAUUSDz', '15m');
-    }
-    $histStore->save('forex', 'XAUUSDz', '15m', $page);
-    $pagesSeen[] = $pageNo;
+$progress = [];
+$stage = function (array $page, int $done, int $pages) use ($histStore, &$progress): bool {
+    $histStore->save('forex', 'XAUUSDz', '15m#sync', $page);
+    $progress[] = [$done, $pages, count($page)];
     return true;
-}, $fakePage);
-assertTrue($total === 2240 && $pagesSeen === [1, 2, 3], "fetchHistory pages until a short page (got $total bars)");
-assertTrue($asked[0] === ['PAXGUSDT', $fromMs, 1000] && $asked[1][1] === $fromMs + 1000 * $stepMs && $asked[2][1] === $fromMs + 2000 * $stepMs, 'each page starts one bar after the last of the page before, on the mapped Binance symbol');
-assertTrue($histStore->count('forex', 'XAUUSDz', '15m') === 2240, 'real history replaced the 650 synthetic seed bars instead of mixing with them');
+};
+$total = MarketFeed::fetchHistory('XAUUSDz', '15m', $fromMs, $toMs, $stage, $fakePage);
+assertTrue($total === 1240 && $progress === [[2, 3, 1000], [3, 3, 240]], "fetchHistory asks every window, skipping the empty one before the listing (got $total bars)");
+assertTrue($asked === [['PAXGUSDT', $fromMs, $fromMs + $spanMs - 1, 1000], ['PAXGUSDT', $fromMs + $spanMs, $fromMs + 2 * $spanMs - 1, 1000], ['PAXGUSDT', $fromMs + 2 * $spanMs, $toMs - 1, 1000]], 'the windows tile the range without overlap, on the mapped Binance symbol');
+assertTrue($histStore->count('forex', 'XAUUSDz', '15m') === 650 && $histStore->count('forex', 'XAUUSDz', '15m#sync') === 1240, 'pages are staged apart: the stored bars stay as they were while fetching');
+$histStore->promote('forex', 'XAUUSDz', '15m#sync', '15m');
+assertTrue($histStore->count('forex', 'XAUUSDz', '15m') === 1240 && $histStore->count('forex', 'XAUUSDz', '15m#sync') === 0, 'promote swaps the staged history in whole, replacing the 650 synthetic seed bars instead of mixing with them');
 $asked = [];
-$stopped = MarketFeed::fetchHistory('XAUUSDz', '15m', $fromMs, fn(array $page, int $pageNo): bool => false, $fakePage);
-assertTrue($stopped === 1000, 'fetchHistory stops when the page handler returns false');
+$fails = 2;
+assertTrue(MarketFeed::fetchHistory('XAUUSDz', '15m', $fromMs, $toMs, fn(): bool => true, $fakePage) === 1240 && count($asked) === 5, 'a window that fails is asked again (twice here) before the fetch goes on');
+$fails = 3;
+try {
+    MarketFeed::fetchHistory('XAUUSDz', '15m', $fromMs, $toMs, fn(): bool => true, $fakePage);
+    $thrown = null;
+} catch (RuntimeException $e) {
+    $thrown = $e->getMessage();
+}
+assertTrue($thrown === 'HTTP 502', 'a window failing three times fails the fetch');
+$asked = [];
+$stopped = MarketFeed::fetchHistory('XAUUSDz', '15m', $fromMs + $spanMs, $toMs, fn(): bool => false, $fakePage);
+assertTrue($stopped === 1000 && count($asked) === 1, 'fetchHistory takes no more windows once the page handler returns false');
 assertTrue(MarketFeed::onlineSymbol('USDJPYz') === null && MarketFeed::historyPages('15m', 365) === 36 && MarketFeed::historyPages('1d', 30) === 1, 'no online source for USDJPYz; a year of 15m bars is 36 pages');
 $histStore->close();
 

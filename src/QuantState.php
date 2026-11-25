@@ -50,6 +50,8 @@ final class QuantState
     private const MIN_TEST_BARS = 300;
     /** 统计「样本内靠前的参数在样本外是否仍盈利」时看排行榜的前几行。 */
     private const OOS_TOP_ROWS = 20;
+    /** 历史拉取期间暂存 K 线用的周期键后缀：全部到齐后才换入正式的周期键。 */
+    private const STAGING_SUFFIX = '#sync';
     private ?DatasetHandle $dataset = null;
     private int $seq = 0;
     private int $streamSeq = 0;
@@ -145,6 +147,8 @@ final class QuantState
 
     private function applyScaleOrLoad(bool $preferOnline): void
     {
+        ++$this->seq; // 换了数据集：在途的线上同步 / 历史拉取作废，回来后不得覆盖新状态
+        $this->syncing = false;
         if ($this->scaleMode === '100k') {
             $this->loadNativeMock(100_000);
         } elseif ($this->scaleMode === '1m') {
@@ -259,8 +263,9 @@ final class QuantState
     }
 
     /**
-     * 拉取最近 $days 天的真实历史 K 线（Binance 翻页），替换该品种/周期已存的行情（含内置合成基准），
-     * 逐页落盘 SQLite 并在状态栏报告进度；完成后流式装入 C SoA 并重算。
+     * 拉取最近 $days 天的真实历史 K 线（Binance，MarketFeed::HISTORY_CONCURRENCY 路并发），替换该品种/周期已存的行情
+     * （含内置合成基准）。拉取期间写入 SQLite 的暂存键，状态栏报告进度；全部成功后才一次性换入正式数据
+     * （CandleStore::promote），所以失败、中止或切换品种都不会留下缺页的行情，原数据原样保留。
      */
     public function syncHistory(int $days): void
     {
@@ -275,37 +280,41 @@ final class QuantState
         $this->scaleMode = 'live';
         $seq = ++$this->seq;
         [$market, $symbol, $interval] = [$this->market, $this->symbol, $this->interval];
-        $pages = MarketFeed::historyPages($interval, $days);
         $label = MarketFeed::HISTORY_SPANS[$days];
         $this->syncing = true;
-        $this->statusText = sprintf('正在拉取 %s (%s) %s真实历史 · 共约 %d 页…', $symbol, $interval, $label, $pages);
+        $this->statusText = sprintf('正在拉取 %s (%s) %s真实历史 · 共 %d 页，%d 路并发…', $symbol, $interval, $label, MarketFeed::historyPages($interval, $days), MarketFeed::HISTORY_CONCURRENCY);
 
-        App::go(function () use ($seq, $market, $symbol, $interval, $days, $pages, $label): void {
+        App::go(function () use ($seq, $market, $symbol, $interval, $days, $label): void {
             $started = microtime(true);
-            $fromMs = (int)(microtime(true) * 1000) - $days * 86_400_000;
+            $toMs = (int)(microtime(true) * 1000);
+            $staging = $interval . self::STAGING_SUFFIX;
             $got = 0;
+            $this->store?->clear($market, $symbol, $staging); // 上次中断留下的暂存
             try {
-                $total = MarketFeed::fetchHistory($symbol, $interval, $fromMs, function (array $page, int $pageNo) use ($seq, $market, $symbol, $interval, $pages, $label, &$got): bool {
+                MarketFeed::fetchHistory($symbol, $interval, $toMs - $days * 86_400_000, $toMs, function (array $page, int $done, int $pages) use ($seq, $market, $symbol, $interval, $staging, $label, &$got): bool {
                     if ($seq !== $this->seq) {
                         return false;
                     }
-                    if ($pageNo === 1) {
-                        $this->store?->clear($market, $symbol, $interval); // 第一页到手才清旧数据：失败时原行情仍在
-                    }
-                    $this->store?->save($market, $symbol, $interval, $page);
+                    $this->store?->save($market, $symbol, $staging, $page);
                     $got += count($page);
-                    $this->statusText = sprintf('正在拉取 %s (%s) %s真实历史 · 第 %d / %d 页 · 已得 %s 根', $symbol, $interval, $label, $pageNo, $pages, number_format($got));
+                    $this->statusText = sprintf('正在拉取 %s (%s) %s真实历史 · %d / %d 页 · 已得 %s 根', $symbol, $interval, $label, $done, $pages, number_format($got));
                     return true;
                 });
-                $err = null;
+                $err = $got === 0 ? '线上没有这段时间的数据' : null;
             } catch (\Throwable $e) {
-                $total = 0;
                 $err = $e->getMessage();
             }
             if ($seq !== $this->seq) {
+                $this->store?->clear($market, $symbol, $staging); // 已切换品种/周期：丢弃，不动任何正式数据
                 return;
             }
             $this->syncing = false;
+            if ($err !== null) {
+                $this->store?->clear($market, $symbol, $staging);
+                $this->statusText = '历史拉取失败（原有行情未改动）: ' . $err;
+                return;
+            }
+            $this->store?->promote($market, $symbol, $staging, $interval);
             $ds = $this->store?->loadDataset($market, $symbol, $interval);
             if ($ds !== null && $ds->count > 0) {
                 $this->dataset?->release();
@@ -315,9 +324,7 @@ final class QuantState
             } else {
                 $ds?->release();
             }
-            $this->statusText = $err === null
-                ? sprintf('已拉取真实历史 → SQLite + C SoA · %s (%s) · %s · %s 根 K 线 · 耗时 %.1f 秒', $symbol, $interval, $label, number_format($this->barCount), microtime(true) - $started)
-                : sprintf('历史拉取中断（已保留拉到的 %s 根）: %s', number_format($this->barCount), $err);
+            $this->statusText = sprintf('已拉取真实历史 → SQLite + C SoA · %s (%s) · %s · %s 根 K 线 · 耗时 %.1f 秒', $symbol, $interval, $label, number_format($this->barCount), microtime(true) - $started);
         });
     }
 
@@ -485,6 +492,8 @@ final class QuantState
             return;
         }
         $this->stopStream(false);
+        ++$this->seq; // 在途的线上同步 / 历史拉取作废
+        $this->syncing = false;
         $this->importing = true;
         try {
             $t0 = hrtime(true);
