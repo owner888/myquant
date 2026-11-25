@@ -717,6 +717,8 @@ MQ_EXPORT int mq_backtest_on_dataset(
     double risk_pct,
     double max_leverage,
     int direction,
+    double swap_long_rate,
+    double swap_short_rate,
     double *out_summary,
     double *out_xs,
     double *out_strategy_ys,
@@ -751,6 +753,7 @@ MQ_EXPORT int mq_backtest_on_dataset(
     double qty = 0.0;
     double entry_price = 0.0;
     double entry_fee = 0.0;
+    double pos_swap = 0.0;
     double risk_dollars = 0.0;
     double stop_price = 0.0;
     int64_t entry_time_ms = 0;
@@ -791,6 +794,20 @@ MQ_EXPORT int mq_backtest_on_dataset(
 
         /* 1. Manage / close existing position */
         if (pos_dir != 0) {
+            if (times) {
+                int64_t prev_day = times[i - 1] / 86400000LL;
+                int64_t cur_day = times[i] / 86400000LL;
+                if (cur_day > prev_day) {
+                    double days = (double)(cur_day - prev_day);
+                    double s_rate = pos_dir == 1 ? swap_long_rate : swap_short_rate;
+                    if (s_rate != 0.0) {
+                        double swap_cost = qty * price * s_rate * days;
+                        pos_swap += swap_cost;
+                        total_fees += swap_cost;
+                    }
+                }
+            }
+
             int hit_stop = 0;
             int flip_exit = 0;
             double raw_exit = price;
@@ -818,8 +835,8 @@ MQ_EXPORT int mq_backtest_on_dataset(
             if (hit_stop || flip_exit) {
                 double exit_fee = qty * raw_exit * fee_rate;
                 double pnl = pos_dir == 1
-                    ? (qty * (raw_exit - entry_price) - entry_fee - exit_fee)
-                    : (qty * (entry_price - raw_exit) - entry_fee - exit_fee);
+                    ? (qty * (raw_exit - entry_price) - entry_fee - exit_fee - pos_swap)
+                    : (qty * (entry_price - raw_exit) - entry_fee - exit_fee - pos_swap);
                 total_fees += exit_fee;
                 double r_mult = risk_dollars > 1e-6 ? (pnl / risk_dollars) : 0.0;
                 r_sum += r_mult;
@@ -848,6 +865,7 @@ MQ_EXPORT int mq_backtest_on_dataset(
                 if (balance < 0.0) balance = 0.0;
                 pos_dir = 0;
                 qty = 0.0;
+                pos_swap = 0.0;
             }
         }
 
@@ -874,6 +892,7 @@ MQ_EXPORT int mq_backtest_on_dataset(
                     entry_price = price;
                     entry_time_ms = times[i];
                     entry_fee = desired_qty * price * fee_rate;
+                    pos_swap = 0.0;
                     total_fees += entry_fee;
                     risk_dollars = desired_qty * stop_dist;
                     if (risk_dollars < 1.0) risk_dollars = 1.0;
@@ -884,9 +903,9 @@ MQ_EXPORT int mq_backtest_on_dataset(
 
         double eq = balance;
         if (pos_dir == 1) {
-            eq = balance + qty * (price - entry_price) - entry_fee - qty * price * fee_rate;
+            eq = balance + qty * (price - entry_price) - entry_fee - qty * price * fee_rate - pos_swap;
         } else if (pos_dir == -1) {
-            eq = balance + qty * (entry_price - price) - entry_fee - qty * price * fee_rate;
+            eq = balance + qty * (entry_price - price) - entry_fee - qty * price * fee_rate - pos_swap;
         }
         if (eq < 0.0) eq = 0.0;
 
@@ -909,9 +928,9 @@ MQ_EXPORT int mq_backtest_on_dataset(
     double last_p = closes[n - 1];
     double final_eq = balance;
     if (pos_dir == 1) {
-        final_eq = balance + qty * (last_p - entry_price) - entry_fee - qty * last_p * fee_rate;
+        final_eq = balance + qty * (last_p - entry_price) - entry_fee - qty * last_p * fee_rate - pos_swap;
     } else if (pos_dir == -1) {
-        final_eq = balance + qty * (entry_price - last_p) - entry_fee - qty * last_p * fee_rate;
+        final_eq = balance + qty * (entry_price - last_p) - entry_fee - qty * last_p * fee_rate - pos_swap;
     }
     if (final_eq < 0.0) final_eq = 0.0;
 
@@ -959,6 +978,7 @@ typedef struct {
 } MqComboTask;
 
 typedef struct {
+    const int64_t *times;
     const double *highs;
     const double *lows;
     const double *closes;
@@ -972,11 +992,14 @@ typedef struct {
     double risk_pct;
     double max_leverage;
     int direction;
+    double swap_long_rate;
+    double swap_short_rate;
     double *out_metrics;
 } MqSweepWorkerArgs;
 
 static void eval_combo_slice(MqSweepWorkerArgs *w) {
     const int n = w->n_candles;
+    const int64_t *times = w->times;
     const double *highs = w->highs;
     const double *lows = w->lows;
     const double *closes = w->closes;
@@ -986,6 +1009,8 @@ static void eval_combo_slice(MqSweepWorkerArgs *w) {
     const double max_lev = w->max_leverage > 0.1 ? w->max_leverage : 0.1;
     const double init_eq = w->initial_equity;
     const int dir_mode = w->direction > 0 ? 1 : (w->direction < 0 ? -1 : 0);
+    const double swap_long_rate = w->swap_long_rate;
+    const double swap_short_rate = w->swap_short_rate;
 
     for (int t = w->start_task; t < w->end_task; t++) {
         int fast_p = w->tasks[t].fast_p;
@@ -1000,6 +1025,7 @@ static void eval_combo_slice(MqSweepWorkerArgs *w) {
         double qty = 0.0;
         double entry_price = 0.0;
         double entry_fee = 0.0;
+        double pos_swap = 0.0;
         double stop_price = 0.0;
         double peak_eq = init_eq;
         double max_dd = 0.0;
@@ -1021,6 +1047,18 @@ static void eval_combo_slice(MqSweepWorkerArgs *w) {
             int cross_bear = (prev_bull == 1 && bull == 0) ? 1 : 0;
 
             if (pos_dir != 0) {
+                if (times) {
+                    int64_t prev_day = times[i - 1] / 86400000LL;
+                    int64_t cur_day = times[i] / 86400000LL;
+                    if (cur_day > prev_day) {
+                        double days = (double)(cur_day - prev_day);
+                        double s_rate = pos_dir == 1 ? swap_long_rate : swap_short_rate;
+                        if (s_rate != 0.0) {
+                            pos_swap += qty * price * s_rate * days;
+                        }
+                    }
+                }
+
                 int hit_stop = 0;
                 int flip_exit = 0;
                 double raw_exit = price;
@@ -1046,12 +1084,13 @@ static void eval_combo_slice(MqSweepWorkerArgs *w) {
                 if (hit_stop || flip_exit) {
                     double exit_fee = qty * raw_exit * fee_rate;
                     double pnl = pos_dir == 1
-                        ? (qty * (raw_exit - entry_price) - entry_fee - exit_fee)
-                        : (qty * (entry_price - raw_exit) - entry_fee - exit_fee);
+                        ? (qty * (raw_exit - entry_price) - entry_fee - exit_fee - pos_swap)
+                        : (qty * (entry_price - raw_exit) - entry_fee - exit_fee - pos_swap);
                     balance += pnl;
                     if (balance < 0.0) balance = 0.0;
                     pos_dir = 0;
                     qty = 0.0;
+                    pos_swap = 0.0;
                     closed++;
                     if (pnl > 0.0) {
                         wins++;
@@ -1083,6 +1122,7 @@ static void eval_combo_slice(MqSweepWorkerArgs *w) {
                         qty = desired_qty;
                         entry_price = price;
                         entry_fee = desired_qty * price * fee_rate;
+                        pos_swap = 0.0;
                         stop_price = want_dir == 1 ? (price - stop_dist) : (price + stop_dist);
                     }
                 }
@@ -1090,9 +1130,9 @@ static void eval_combo_slice(MqSweepWorkerArgs *w) {
 
             double eq = balance;
             if (pos_dir == 1) {
-                eq = balance + qty * (price - entry_price) - entry_fee - qty * price * fee_rate;
+                eq = balance + qty * (price - entry_price) - entry_fee - qty * price * fee_rate - pos_swap;
             } else if (pos_dir == -1) {
-                eq = balance + qty * (entry_price - price) - entry_fee - qty * price * fee_rate;
+                eq = balance + qty * (entry_price - price) - entry_fee - qty * price * fee_rate - pos_swap;
             }
             if (eq < 0.0) eq = 0.0;
 
@@ -1108,9 +1148,9 @@ static void eval_combo_slice(MqSweepWorkerArgs *w) {
         double last_p = closes[n - 1];
         double final_eq = balance;
         if (pos_dir == 1) {
-            final_eq = balance + qty * (last_p - entry_price) - entry_fee - qty * last_p * fee_rate;
+            final_eq = balance + qty * (last_p - entry_price) - entry_fee - qty * last_p * fee_rate - pos_swap;
         } else if (pos_dir == -1) {
-            final_eq = balance + qty * (entry_price - last_p) - entry_fee - qty * last_p * fee_rate;
+            final_eq = balance + qty * (entry_price - last_p) - entry_fee - qty * last_p * fee_rate - pos_swap;
         }
         if (final_eq < 0.0) final_eq = 0.0;
 
@@ -1143,6 +1183,7 @@ static void *posix_worker_entry(void *arg) {
 #endif
 
 static int run_parallel_sweep(
+    const int64_t *times,
     const double *highs,
     const double *lows,
     const double *closes,
@@ -1159,6 +1200,8 @@ static int run_parallel_sweep(
     double risk_pct,
     double max_leverage,
     int direction,
+    double swap_long_rate,
+    double swap_short_rate,
     int n_threads,
     double *out_metrics,
     int max_combos
@@ -1200,9 +1243,9 @@ static int run_parallel_sweep(
 
     if (workers <= 1) {
         MqSweepWorkerArgs single = {
-            highs, lows, closes, atr, n_candles,
+            times, highs, lows, closes, atr, n_candles,
             tasks, 0, total,
-            initial_equity, fee_rate, risk_pct, max_leverage, direction, out_metrics
+            initial_equity, fee_rate, risk_pct, max_leverage, direction, swap_long_rate, swap_short_rate, out_metrics
         };
         eval_combo_slice(&single);
         free(tasks);
@@ -1217,9 +1260,9 @@ static int run_parallel_sweep(
         int s = (total * w) / workers;
         int e = (total * (w + 1)) / workers;
         args[w] = (MqSweepWorkerArgs){
-            highs, lows, closes, atr, n_candles,
+            times, highs, lows, closes, atr, n_candles,
             tasks, s, e,
-            initial_equity, fee_rate, risk_pct, max_leverage, direction, out_metrics
+            initial_equity, fee_rate, risk_pct, max_leverage, direction, swap_long_rate, swap_short_rate, out_metrics
         };
         if (w == workers - 1) {
             eval_combo_slice(&args[w]);
@@ -1240,9 +1283,9 @@ static int run_parallel_sweep(
         int s = (total * w) / workers;
         int e = (total * (w + 1)) / workers;
         args[w] = (MqSweepWorkerArgs){
-            highs, lows, closes, atr, n_candles,
+            times, highs, lows, closes, atr, n_candles,
             tasks, s, e,
-            initial_equity, fee_rate, risk_pct, max_leverage, direction, out_metrics
+            initial_equity, fee_rate, risk_pct, max_leverage, direction, swap_long_rate, swap_short_rate, out_metrics
         };
         if (w == workers - 1) {
             eval_combo_slice(&args[w]);
@@ -1274,6 +1317,8 @@ MQ_EXPORT int mq_sweep_on_dataset(
     double risk_pct,
     double max_leverage,
     int direction,
+    double swap_long_rate,
+    double swap_short_rate,
     int n_threads,
     double *out_metrics,
     int max_combos
@@ -1283,6 +1328,7 @@ MQ_EXPORT int mq_sweep_on_dataset(
         return -1;
     }
     return run_parallel_sweep(
+        ds->time_ms,
         ds->high,
         ds->low,
         ds->close,
@@ -1292,6 +1338,7 @@ MQ_EXPORT int mq_sweep_on_dataset(
         slow_list, n_slow,
         atr_mults, n_atr,
         initial_equity, fee_rate, risk_pct, max_leverage, direction,
+        swap_long_rate, swap_short_rate,
         n_threads, out_metrics, max_combos
     );
 }
@@ -1343,9 +1390,10 @@ MQ_EXPORT int mq_sweep_ema_atr(
     }
 
     int written = run_parallel_sweep(
-        highs, lows, closes, atr, n_candles,
+        NULL, highs, lows, closes, atr, n_candles,
         fast_list, n_fast, slow_list, n_slow, atr_mults, n_atr,
         initial_equity, fee_rate, risk_pct, max_leverage, MQ_DIR_LONG,
+        0.0, 0.0,
         0, out_metrics, max_combos
     );
     free(atr);

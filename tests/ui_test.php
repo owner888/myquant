@@ -43,19 +43,23 @@ $gapCandles[245] = new Candle($gapCandles[245]->openTimeMs, 4950.0, 4990.0, 4920
 $cDs = DatasetHandle::fromCandles($gapCandles);
 $phpDs = DatasetHandle::fromCandles($gapCandles, forcePhpFallback: true);
 foreach ([Backtester::DIR_LONG, Backtester::DIR_SHORT, Backtester::DIR_BOTH] as $dir) {
-    $cRes = Backtester::runOnDataset($cDs, 8, 24, 1.8, 0.01, 0.0005, 10000.0, 3.0, $dir);
-    $pRes = Backtester::runOnDataset($phpDs, 8, 24, 1.8, 0.01, 0.0005, 10000.0, 3.0, $dir);
-    assertClose($cRes['finalEquity'], $pRes['finalEquity'], 1e-6, "Dir $dir finalEquity C vs PHP parity");
+    $cRes = Backtester::runOnDataset($cDs, 8, 24, 1.8, 0.01, 0.0005, 10000.0, 3.0, $dir, 0.0002, -0.0001);
+    $pRes = Backtester::runOnDataset($phpDs, 8, 24, 1.8, 0.01, 0.0005, 10000.0, 3.0, $dir, 0.0002, -0.0001);
+    assertClose($cRes['finalEquity'], $pRes['finalEquity'], 1e-6, "Dir $dir finalEquity C vs PHP parity (with overnight swap)");
     assertClose($cRes['maxDrawdownPct'], $pRes['maxDrawdownPct'], 1e-6, "Dir $dir maxDrawdownPct C vs PHP parity");
     assertClose($cRes['profitFactor'], $pRes['profitFactor'], 1e-6, "Dir $dir profitFactor C vs PHP parity");
     assertClose($cRes['totalFeesQuote'], $pRes['totalFeesQuote'], 1e-6, "Dir $dir totalFeesQuote C vs PHP parity");
     assertTrue($cRes['closedTrades'] === $pRes['closedTrades'], "Dir $dir closedTrades C vs PHP parity ({$cRes['closedTrades']})");
 
-    $cSw = SweepRunner::sweepOnDataset($cDs, [6, 12], [24, 36], [1.5, 2.5], 10000.0, 0.0005, 0.01, 3.0, $dir);
-    $pSw = SweepRunner::sweepOnDataset($phpDs, [6, 12], [24, 36], [1.5, 2.5], 10000.0, 0.0005, 0.01, 3.0, $dir);
+    $cSw = SweepRunner::sweepOnDataset($cDs, [6, 12], [24, 36], [1.5, 2.5], 10000.0, 0.0005, 0.01, 3.0, $dir, 0.0002, -0.0001);
+    $pSw = SweepRunner::sweepOnDataset($phpDs, [6, 12], [24, 36], [1.5, 2.5], 10000.0, 0.0005, 0.01, 3.0, $dir, 0.0002, -0.0001);
     assertTrue(count($cSw['rows']) === count($pSw['rows']), "Sweep Dir $dir row count parity");
     assertClose($cSw['rows'][0]['netReturnPct'], $pSw['rows'][0]['netReturnPct'], 1e-6, "Sweep Dir $dir top netReturnPct parity");
 }
+// Verify overnight swap cost reduces long equity vs zero swap
+$noSwap = Backtester::runOnDataset($cDs, 8, 24, 1.8, 0.01, 0.0005, 10000.0, 3.0, Backtester::DIR_LONG, 0.0, 0.0);
+$withSwap = Backtester::runOnDataset($cDs, 8, 24, 1.8, 0.01, 0.0005, 10000.0, 3.0, Backtester::DIR_LONG, 0.0010, 0.0);
+assertTrue($withSwap['finalEquity'] < $noSwap['finalEquity'] && $withSwap['totalFeesQuote'] > $noSwap['totalFeesQuote'], 'Positive long swap rate deducts overnight financing across UTC day rollovers');
 $cDs->release();
 $phpDs->release();
 
@@ -96,9 +100,9 @@ $sliceTest = $diskStore->loadSlice('forex', 'XAUUSDz', '15m', 8750, 3750);
 $sliceTrain = $diskStore->loadSlice('forex', 'XAUUSDz', '15m', 0, 8750);
 assertTrue($sliceTrain !== null && $sliceTrain->count === 8750 && $sliceTest !== null && $sliceTest->count === 3750, 'loadSlice cuts the stored bars in two by time');
 assertTrue($sliceTrain->lastCandle()->openTimeMs + 60_000 === 1770000000_000 + 8750 * 60_000 && $sliceTest->lastCandle()->openTimeMs === 1770000000_000 + 12_499 * 60_000, 'the slices meet at the split bar and end at the last one');
-$direct = Backtester::runOnDataset($sliceTest, $topRow['fast'], $topRow['slow'], $topRow['atrMult'], max(0.001, $importState->riskPct / 100.0), max(0.0, $importState->feeBps / 10000.0), 10000.0, 3.0, Backtester::DIR_LONG);
+$direct = Backtester::runOnDataset($sliceTest, $topRow['fast'], $topRow['slow'], $topRow['atrMult'], max(0.001, $importState->riskPct / 100.0), $importState->effectiveFeeRate(), 10000.0, 3.0, Backtester::DIR_LONG, $importState->swapLongBps / 10000.0, $importState->swapShortBps / 10000.0);
 assertClose($topRow['oos']['netReturnPct'], $direct['netReturnPct'], 1e-6, "A row's out-of-sample return is its parameters backtested on the last 30% alone");
-$inSampleOnly = SweepRunner::sweepOnDataset($sliceTrain, feeRate: max(0.0, $importState->feeBps / 10000.0), riskPct: max(0.001, $importState->riskPct / 100.0), maxLeverage: 3.0);
+$inSampleOnly = SweepRunner::sweepOnDataset($sliceTrain, feeRate: $importState->effectiveFeeRate(), riskPct: max(0.001, $importState->riskPct / 100.0), maxLeverage: 3.0, swapLongRate: $importState->swapLongBps / 10000.0, swapShortRate: $importState->swapShortBps / 10000.0);
 assertTrue($inSampleOnly['rows'][0]['id'] === $topRow['id'], 'and the leaderboard is ranked on the first 70% alone');
 $sliceTrain->release();
 $sliceTest->release();

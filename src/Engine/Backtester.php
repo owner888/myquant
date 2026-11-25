@@ -30,6 +30,8 @@ final class Backtester
         float $initialEquity = 10000.0,
         float $maxLeverage = 1.0,
         int $direction = self::DIR_LONG,
+        float $swapLongRate = 0.0,
+        float $swapShortRate = 0.0,
     ): array {
         $n = count($candles);
         if ($n < 30 || $fastPeriod < 2 || $fastPeriod >= $slowPeriod || $initialEquity <= 0.0) {
@@ -69,6 +71,7 @@ final class Backtester
         $entryPrice = 0.0;
         $entryTimeMs = 0;
         $entryFee = 0.0;
+        $posSwap = 0.0;
         $riskDollars = 0.0;
         $stopPrice = 0.0;
 
@@ -98,6 +101,18 @@ final class Backtester
 
             // 1. Manage / close existing position
             if ($posDir !== 0) {
+                $prevDay = intdiv($candles[$i - 1]->openTimeMs, 86_400_000);
+                $curDay = intdiv($c->openTimeMs, 86_400_000);
+                if ($curDay > $prevDay) {
+                    $days = (float)($curDay - $prevDay);
+                    $sRate = $posDir === 1 ? $swapLongRate : $swapShortRate;
+                    if ($sRate !== 0.0) {
+                        $swapCost = $qty * $price * $sRate * $days;
+                        $posSwap += $swapCost;
+                        $totalFees += $swapCost;
+                    }
+                }
+
                 $hitStop = false;
                 $flipExit = false;
                 $rawExit = $price;
@@ -129,9 +144,9 @@ final class Backtester
                 if ($hitStop || $flipExit) {
                     $exitFee = $qty * $rawExit * $feeRate;
                     $pnl = $posDir === 1
-                        ? ($qty * ($rawExit - $entryPrice) - $entryFee - $exitFee)
-                        : ($qty * ($entryPrice - $rawExit) - $entryFee - $exitFee);
-                    $totalFee = $entryFee + $exitFee;
+                        ? ($qty * ($rawExit - $entryPrice) - $entryFee - $exitFee - $posSwap)
+                        : ($qty * ($entryPrice - $rawExit) - $entryFee - $exitFee - $posSwap);
+                    $totalFee = $entryFee + $exitFee + $posSwap;
                     $totalFees += $exitFee;
                     $rMult = $riskDollars > 1e-6 ? ($pnl / $riskDollars) : 0.0;
                     $rSum += $rMult;
@@ -160,6 +175,7 @@ final class Backtester
                     $balance = max(0.0, $balance + $pnl);
                     $posDir = 0;
                     $qty = 0.0;
+                    $posSwap = 0.0;
                 }
             }
 
@@ -188,6 +204,7 @@ final class Backtester
                         $entryPrice = $price;
                         $entryTimeMs = $c->openTimeMs;
                         $entryFee = $desiredQty * $price * $feeRate;
+                        $posSwap = 0.0;
                         $totalFees += $entryFee;
                         $riskDollars = max(1.0, $desiredQty * $stopDist);
                         $stopPrice = $wantDir === 1 ? ($price - $stopDist) : ($price + $stopDist);
@@ -196,8 +213,8 @@ final class Backtester
             }
 
             $eq = match ($posDir) {
-                1 => $balance + $qty * ($price - $entryPrice) - $entryFee - $qty * $price * $feeRate,
-                -1 => $balance + $qty * ($entryPrice - $price) - $entryFee - $qty * $price * $feeRate,
+                1 => $balance + $qty * ($price - $entryPrice) - $entryFee - $qty * $price * $feeRate - $posSwap,
+                -1 => $balance + $qty * ($entryPrice - $price) - $entryFee - $qty * $price * $feeRate - $posSwap,
                 default => $balance,
             };
             if ($eq < 0.0) {
@@ -322,10 +339,12 @@ final class Backtester
         float $initialEquity = 10000.0,
         float $maxLeverage = 1.0,
         int $direction = self::DIR_LONG,
+        float $swapLongRate = 0.0,
+        float $swapShortRate = 0.0,
     ): array {
         if ($ds->id <= 0 || !QuantSweepFfi::available()) {
             $t0 = hrtime(true);
-            $res = self::run($ds->fallbackCandles, $fastPeriod, $slowPeriod, $atrMult, $riskPct, $feeRate, $initialEquity, $maxLeverage, $direction);
+            $res = self::run($ds->fallbackCandles, $fastPeriod, $slowPeriod, $atrMult, $riskPct, $feeRate, $initialEquity, $maxLeverage, $direction, $swapLongRate, $swapShortRate);
             $res['elapsedMs'] = (hrtime(true) - $t0) / 1e6;
             return $res;
         }
@@ -354,6 +373,8 @@ final class Backtester
             $riskPct,
             $maxLeverage,
             $direction,
+            $swapLongRate,
+            $swapShortRate,
             \FFI::addr($summary[0]),
             \FFI::addr($xs[0]),
             \FFI::addr($sYs[0]),

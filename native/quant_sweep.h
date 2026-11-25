@@ -107,6 +107,8 @@ MQ_EXPORT int mq_backtest_on_dataset(
     double risk_pct,
     double max_leverage,
     int direction,
+    double swap_long_rate,
+    double swap_short_rate,
     double *out_summary,
     double *out_xs,
     double *out_strategy_ys,
@@ -130,6 +132,8 @@ MQ_EXPORT int mq_sweep_on_dataset(
     double risk_pct,
     double max_leverage,
     int direction,
+    double swap_long_rate,
+    double swap_short_rate,
     int n_threads,
     double *out_metrics,
     int max_combos

@@ -313,8 +313,20 @@ $labPage = function () use ($isCompact, $card, $metricTile, $scopeBar, $syncTool
                         Slider(value: $this->riskPct, in: [0.25, 3.0], step: 0.25, onEditingChanged: fn(bool $e) => !$e && $this->recomputeAll()),
                     ),
                     VStack(alignment: HorizontalAlignment::leading, spacing: 6)(
-                        Text(verbatim: sprintf('单边交易摩擦 (手续费+滑点): %.1f bps (%.3f%%)', $this->feeBps, $this->feeBps * 0.01))->font(Font::caption)->foregroundStyle(Color::secondary),
+                        Text(verbatim: sprintf('单边手续费 (Commission): %.1f bps (%.3f%%)', $this->feeBps, $this->feeBps * 0.01))->font(Font::caption)->foregroundStyle(Color::secondary),
                         Slider(value: $this->feeBps, in: [0.0, 15.0], step: 0.2, onEditingChanged: fn(bool $e) => !$e && $this->recomputeAll()),
+                    ),
+                    VStack(alignment: HorizontalAlignment::leading, spacing: 6)(
+                        Text(verbatim: sprintf('点差与冲击滑点 (Spread+Slippage): %.1f bps', $this->spreadBps))->font(Font::caption)->foregroundStyle(Color::secondary),
+                        Slider(value: $this->spreadBps, in: [0.0, 20.0], step: 0.5, onEditingChanged: fn(bool $e) => !$e && $this->recomputeAll()),
+                    ),
+                    VStack(alignment: HorizontalAlignment::leading, spacing: 6)(
+                        Text(verbatim: sprintf('多单隔夜利息/资金费 (Swap Long): %+.1f bps/日', $this->swapLongBps))->font(Font::caption)->foregroundStyle(Color::secondary),
+                        Slider(value: $this->swapLongBps, in: [-10.0, 15.0], step: 0.5, onEditingChanged: fn(bool $e) => !$e && $this->recomputeAll()),
+                    ),
+                    VStack(alignment: HorizontalAlignment::leading, spacing: 6)(
+                        Text(verbatim: sprintf('空单隔夜利息/资金费 (Swap Short): %+.1f bps/日', $this->swapShortBps))->font(Font::caption)->foregroundStyle(Color::secondary),
+                        Slider(value: $this->swapShortBps, in: [-10.0, 15.0], step: 0.5, onEditingChanged: fn(bool $e) => !$e && $this->recomputeAll()),
                     ),
                 ),
                 Divider(),
@@ -492,9 +504,13 @@ $journalPage = function () use ($isCompact, $card, $scopeBar, $syncToolbar, $gre
             $card(
                 Text('交易摩擦与归因体检')->font(Font::headline),
                 Text(verbatim: sprintf(
-                    '总毛利: $%.2f  |  总毛亏: -$%.2f  |  累计摩擦支出(手续费+滑点): $%.2f (占毛利 %.1f%%)',
+                    '总毛利: $%.2f  |  总毛亏: -$%.2f  |  累计摩擦支出(手续费 %.1f + 点差滑点 %.1f + 隔夜利息 %+.1f/%+.1f bps/日): $%.2f (占毛利 %.1f%%)',
                     $grossWin,
                     (float)($r['grossLossQuote'] ?? 0.0),
+                    $this->feeBps,
+                    $this->spreadBps,
+                    $this->swapLongBps,
+                    $this->swapShortBps,
                     $fees,
                     $feeShare
                 ))->font($isPhone ? Font::caption : Font::subheadline)->foregroundStyle($feeShare > 35.0 ? $red : $green),

@@ -89,6 +89,8 @@ final class QuantSweepFfi
  double risk_pct,
  double max_leverage,
  int direction,
+ double swap_long_rate,
+ double swap_short_rate,
  double *out_summary,
  double *out_xs,
  double *out_strategy_ys,
@@ -111,6 +113,8 @@ final class QuantSweepFfi
  double risk_pct,
  double max_leverage,
  int direction,
+ double swap_long_rate,
+ double swap_short_rate,
  int n_threads,
  double *out_metrics,
  int max_combos
@@ -321,9 +325,9 @@ final class QuantSweepFfi
      * @param CData|null $out_drawdown_ys
      * @param CData|null $out_trades
      */
-    public static function mq_backtest_on_dataset(int $ds_id, int $fast_period, int $slow_period, float $atr_mult, float $initial_equity, float $fee_rate, float $risk_pct, float $max_leverage, int $direction, mixed $out_summary, mixed $out_xs, mixed $out_strategy_ys, mixed $out_hold_ys, mixed $out_drawdown_ys, int $max_curve_pts, mixed $out_trades, int $max_trades): int
+    public static function mq_backtest_on_dataset(int $ds_id, int $fast_period, int $slow_period, float $atr_mult, float $initial_equity, float $fee_rate, float $risk_pct, float $max_leverage, int $direction, float $swap_long_rate, float $swap_short_rate, mixed $out_summary, mixed $out_xs, mixed $out_strategy_ys, mixed $out_hold_ys, mixed $out_drawdown_ys, int $max_curve_pts, mixed $out_trades, int $max_trades): int
     {
-        return self::ffi()->mq_backtest_on_dataset($ds_id, $fast_period, $slow_period, $atr_mult, $initial_equity, $fee_rate, $risk_pct, $max_leverage, $direction, $out_summary, $out_xs, $out_strategy_ys, $out_hold_ys, $out_drawdown_ys, $max_curve_pts, $out_trades, $max_trades);
+        return self::ffi()->mq_backtest_on_dataset($ds_id, $fast_period, $slow_period, $atr_mult, $initial_equity, $fee_rate, $risk_pct, $max_leverage, $direction, $swap_long_rate, $swap_short_rate, $out_summary, $out_xs, $out_strategy_ys, $out_hold_ys, $out_drawdown_ys, $max_curve_pts, $out_trades, $max_trades);
     }
 
     /**
@@ -332,9 +336,9 @@ final class QuantSweepFfi
      * @param CData|null $atr_mults
      * @param CData|null $out_metrics
      */
-    public static function mq_sweep_on_dataset(int $ds_id, mixed $fast_list, int $n_fast, mixed $slow_list, int $n_slow, mixed $atr_mults, int $n_atr, float $initial_equity, float $fee_rate, float $risk_pct, float $max_leverage, int $direction, int $n_threads, mixed $out_metrics, int $max_combos): int
+    public static function mq_sweep_on_dataset(int $ds_id, mixed $fast_list, int $n_fast, mixed $slow_list, int $n_slow, mixed $atr_mults, int $n_atr, float $initial_equity, float $fee_rate, float $risk_pct, float $max_leverage, int $direction, float $swap_long_rate, float $swap_short_rate, int $n_threads, mixed $out_metrics, int $max_combos): int
     {
-        return self::ffi()->mq_sweep_on_dataset($ds_id, $fast_list, $n_fast, $slow_list, $n_slow, $atr_mults, $n_atr, $initial_equity, $fee_rate, $risk_pct, $max_leverage, $direction, $n_threads, $out_metrics, $max_combos);
+        return self::ffi()->mq_sweep_on_dataset($ds_id, $fast_list, $n_fast, $slow_list, $n_slow, $atr_mults, $n_atr, $initial_equity, $fee_rate, $risk_pct, $max_leverage, $direction, $swap_long_rate, $swap_short_rate, $n_threads, $out_metrics, $max_combos);
     }
 
     /**

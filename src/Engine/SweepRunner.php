@@ -29,9 +29,11 @@ final class SweepRunner
         float $riskPct = 0.01,
         float $maxLeverage = 1.0,
         int $direction = Backtester::DIR_LONG,
+        float $swapLongRate = 0.0,
+        float $swapShortRate = 0.0,
     ): array {
         if ($ds->id <= 0 || !QuantSweepFfi::available()) {
-            return self::sweepPhp($ds->fallbackCandles, $fastList, $slowList, $atrMults, $initialEquity, $feeRate, $riskPct, $maxLeverage, $direction);
+            return self::sweepPhp($ds->fallbackCandles, $fastList, $slowList, $atrMults, $initialEquity, $feeRate, $riskPct, $maxLeverage, $direction, $swapLongRate, $swapShortRate);
         }
 
         $t0 = hrtime(true);
@@ -64,6 +66,8 @@ final class SweepRunner
             $riskPct,
             $maxLeverage,
             $direction,
+            $swapLongRate,
+            $swapShortRate,
             0, // auto-detect all CPU cores
             FFI::addr($outBuf[0]),
             $maxCombos,
@@ -111,13 +115,15 @@ final class SweepRunner
         float $riskPct = 0.01,
         float $maxLeverage = 1.0,
         int $direction = Backtester::DIR_LONG,
+        float $swapLongRate = 0.0,
+        float $swapShortRate = 0.0,
     ): array {
         $ds = DatasetHandle::fromCandles($candles);
         try {
             if ($ds->id > 0) {
-                return self::sweepOnDataset($ds, $fastList, $slowList, $atrMults, $initialEquity, $feeRate, $riskPct, $maxLeverage, $direction);
+                return self::sweepOnDataset($ds, $fastList, $slowList, $atrMults, $initialEquity, $feeRate, $riskPct, $maxLeverage, $direction, $swapLongRate, $swapShortRate);
             }
-            return self::sweepPhp($candles, $fastList, $slowList, $atrMults, $initialEquity, $feeRate, $riskPct, $maxLeverage, $direction);
+            return self::sweepPhp($candles, $fastList, $slowList, $atrMults, $initialEquity, $feeRate, $riskPct, $maxLeverage, $direction, $swapLongRate, $swapShortRate);
         } finally {
             $ds->release();
         }
@@ -136,6 +142,8 @@ final class SweepRunner
         float $riskPct,
         float $maxLeverage,
         int $direction,
+        float $swapLongRate = 0.0,
+        float $swapShortRate = 0.0,
     ): array {
         $t0 = hrtime(true);
         $rawCells = [];
@@ -143,7 +151,7 @@ final class SweepRunner
             foreach ($slowList as $s) {
                 if ($s <= $f) { continue; }
                 foreach ($atrMults as $a) {
-                    $bt = Backtester::run($candles, $f, $s, $a, $riskPct, $feeRate, $initialEquity, $maxLeverage, $direction);
+                    $bt = Backtester::run($candles, $f, $s, $a, $riskPct, $feeRate, $initialEquity, $maxLeverage, $direction, $swapLongRate, $swapShortRate);
                     $key = "$f:$s:" . round($a, 2);
                     $rawCells[$key] = [
                         'fast' => $f,

@@ -21,6 +21,9 @@ final class QuantState
     public float $atrMult = 2.0;
     public float $riskPct = 1.0;
     public float $feeBps = 0.2;
+    public float $spreadBps = 1.5;
+    public float $swapLongBps = 1.8;
+    public float $swapShortBps = -0.5;
 
     // Viewport pan & zoom over the C LOD pyramid (0..100%)
     public float $viewStartPct = 0.0;
@@ -101,6 +104,9 @@ final class QuantState
             $this->symbol = $symbols[0];
         }
         $this->feeBps = MarketFeed::MARKETS[$newMarket]['defaultFeeBps'];
+        $this->spreadBps = MarketFeed::MARKETS[$newMarket]['defaultSpreadBps'];
+        $this->swapLongBps = MarketFeed::MARKETS[$newMarket]['defaultSwapLongBps'];
+        $this->swapShortBps = MarketFeed::MARKETS[$newMarket]['defaultSwapShortBps'];
         $this->applyScaleOrLoad(false);
     }
 
@@ -540,6 +546,12 @@ final class QuantState
         $this->runSweep();
     }
 
+    /** 单边总即时成本率：手续费 + 半点差与冲击滑点（bps -> 小数）。 */
+    public function effectiveFeeRate(): float
+    {
+        return max(0.0, ($this->feeBps + 0.5 * $this->spreadBps) / 10000.0);
+    }
+
     public function runBacktest(): void
     {
         if ($this->dataset === null) {
@@ -555,10 +567,12 @@ final class QuantState
             slowPeriod: $slow,
             atrMult: max(0.5, $this->atrMult),
             riskPct: max(0.001, $this->riskPct / 100.0),
-            feeRate: max(0.0, $this->feeBps / 10000.0),
+            feeRate: $this->effectiveFeeRate(),
             initialEquity: 10000.0,
             maxLeverage: $this->market === 'forex' ? 3.0 : 1.0,
             direction: $this->directionCode(),
+            swapLongRate: $this->swapLongBps / 10000.0,
+            swapShortRate: $this->swapShortBps / 10000.0,
         );
         $this->phpMemoryMb = memory_get_usage() / 1048576.0;
     }
@@ -568,16 +582,21 @@ final class QuantState
         if ($this->dataset === null) {
             return;
         }
+        $feeRate = $this->effectiveFeeRate();
+        $swapL = $this->swapLongBps / 10000.0;
+        $swapS = $this->swapShortBps / 10000.0;
         $sweepOn = fn(DatasetHandle $ds): array => SweepRunner::sweepOnDataset(
             ds: $ds,
             fastList: [6, 9, 12, 16, 20, 25],
             slowList: [24, 32, 42, 55, 72, 96],
             atrMults: [1.5, 2.0, 2.5, 3.0],
             initialEquity: 10000.0,
-            feeRate: max(0.0, $this->feeBps / 10000.0),
+            feeRate: $feeRate,
             riskPct: max(0.001, $this->riskPct / 100.0),
             maxLeverage: $this->market === 'forex' ? 3.0 : 1.0,
             direction: $this->directionCode(),
+            swapLongRate: $swapL,
+            swapShortRate: $swapS,
         );
         [$train, $test] = $this->splitForValidation();
         if ($train === null || $test === null) {

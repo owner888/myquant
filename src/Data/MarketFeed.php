@@ -21,12 +21,18 @@ final class MarketFeed
         'crypto' => [
             'label' => '加密市场 · Binance',
             'symbols' => ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'PAXGUSDT'],
-            'defaultFeeBps' => 8.0, // 0.08% per leg (Taker + slippage)
+            'defaultFeeBps' => 5.0, // 0.05% per leg Taker fee
+            'defaultSpreadBps' => 2.0, // 2 bps bid-ask spread + market slippage
+            'defaultSwapLongBps' => 3.0, // ~0.01% per 8h funding = 3 bps/day
+            'defaultSwapShortBps' => -1.5, // short side typically collects positive funding
         ],
         'forex' => [
             'label' => '黄金外汇 · Exness Zero',
             'symbols' => ['XAUUSDz', 'EURUSDz', 'USDJPYz'],
             'defaultFeeBps' => 0.2, // 0.002% per leg ($0.08/oz commission on $4,400 gold)
+            'defaultSpreadBps' => 1.5, // ~0.65 USD spread + slippage on XAUUSD
+            'defaultSwapLongBps' => 1.8, // overnight long swap financing cost per UTC day
+            'defaultSwapShortBps' => -0.5, // overnight short swap credit/cost per UTC day
         ],
     ];
 
