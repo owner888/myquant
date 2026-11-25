@@ -47,7 +47,7 @@
 ```text
 .
 ├── app.php                     # 应用入口（窗口尺寸、macOS hiddenInset / Win11 Mica 配置）
-├── boot.php                    # 三级框架加载器（./myphp -> $MYPHP_HOME -> ./vendor）+ 内置 PSR-4
+├── boot.php                    # 框架加载器（./myphp -> $MYPHP_HOME -> myphp.json framework）+ 内置 PSR-4
 ├── view.php                    # 声明式跨端 UI（回测实验室 / C 原生参数高原 / 成交账本 / 量化手册）
 ├── myphp.json                  # MyPHP 打包配置与 ffigen 自动绑定声明
 ├── native/
@@ -80,24 +80,24 @@
 ## 常用命令
 
 ```bash
-# 1. 安装公共版 MyPHP 依赖（要求 PHP >= 8.4 且开启 ext-ffi）
-composer install
+# 1. 安装（或升级）全局的 MyPHP，像 Flutter SDK 一样一台机器一份（要求 PHP >= 8.4 且开启 ext-ffi）
+curl -fsSL https://myphp.ai/install.sh | sh   # 已安装则: myphp upgrade
 
 # 2. 编译跨平台 C 动态库并重新生成 FFI 绑定
 ./scripts/build_native.sh
-./vendor/bin/myphp generate .
+myphp generate .
 
 # 交叉编译指定目标平台（安装了 zig 时可直接在 macOS 交叉编译 Linux / Windows）：
 ./scripts/build_native.sh darwin-arm64 darwin-amd64 linux-amd64 linux-arm64 windows-amd64
 
 # 3. 运行无头 UI 与 100 万根 K 线 FFI 自动化压测
-php -d ffi.enable=1 tests/ui_test.php
+myphp test
 
 # 4. 启动桌面热重载开发窗口
-./vendor/bin/myphp dev .
+myphp dev .
 
 # 5. 打包独立桌面 / 移动生产应用
-./vendor/bin/myphp build -platform darwin/arm64 .
+myphp build -platform darwin/arm64 .
 ```
 
 ---
@@ -111,7 +111,7 @@ php -d ffi.enable=1 tests/ui_test.php
 | `MYQUANT_SCALE` | `live`（默认，SQLite/实盘行情）、`100k`（启动即在 C 侧生成 10 万根 K 线）、`1m`（启动即生成 100 万根 K 线） |
 | `MYQUANT_DIR` | `long`（默认，仅做多）、`both`（多空双向反转）、`short`（仅做空） |
 | `MYQUANT_TAB` | `lab`（回测实验室）、`sweep`（C 原生参数高原）、`journal`（成交账本与摩擦）、`guide`（量化手册） |
-| `MYPHP_HOME` | 指向本地 MyPHP 框架源码目录时，`boot.php` 会优先于 `vendor/owner888/myphp` 加载，便于框架联调 |
+| `MYPHP_HOME` | MyPHP 框架目录。`myphp` 命令（dev / run / test / screenshot）会自动设置为它自己那份；手动指向另一份检出可做框架联调 |
 
 ---
 

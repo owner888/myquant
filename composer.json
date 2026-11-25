@@ -5,8 +5,7 @@
     "license": "MIT",
     "require": {
         "php": ">=8.4",
-        "ext-ffi": "*",
-        "owner888/myphp": "^1.204.5"
+        "ext-ffi": "*"
     },
     "autoload": {
         "psr-4": {

@@ -32,7 +32,7 @@ native/quant_sweep.c (g_datasets[64] 常驻 C 侧列式数组 + Wilder ATR(14) �
 
 ## 2. C99 内核与 FFI 协议契约（`native/quant_sweep.h`）
 
-> **注意**：`src/Native/QuantSweepFfi.php` 由 `./vendor/bin/myphp generate .` 根据 `myphp.json` 中的 `ffigen` 配置自动生成，**请勿手动编辑该文件**。
+> **注意**：`src/Native/QuantSweepFfi.php` 由 `myphp generate .` 根据 `myphp.json` 中的 `ffigen` 配置自动生成，**请勿手动编辑该文件**。
 
 ### 2.1 版本与常量
 - `MQ_SWEEP_VERSION = 3`
@@ -86,8 +86,8 @@ native/quant_sweep.c (g_datasets[64] 常驻 C 侧列式数组 + Wilder ATR(14) �
 ## 3. 启动加载链与 UI 约定
 
 1. **`boot.php` 加载优先级**
-   - 先注册内置 `MyQuant\` -> `src/` 的轻量 PSR-4 自动加载器（即使没有 `vendor/` 也能工作）。
-   - 框架加载顺序：`./myphp`（打包独立产物） → `$MYPHP_HOME`（本地框架开发/截图 CLI） → `myphp.json` 中的 `framework` 配置 → `./vendor/autoload.php`。**切勿颠倒 `$MYPHP_HOME` 与 `vendor/` 的优先级**，否则框架侧升级特性在联调时会被锁定的旧 `vendor/` 遮蔽。
+   - 先注册内置 `MyQuant\` -> `src/` 的轻量 PSR-4 自动加载器；项目若有其他 Composer 包，再加载 `vendor/autoload.php`。
+   - **MyPHP 不是项目的 Composer 依赖**，像 Flutter SDK 一样全局安装、`myphp upgrade` 一次升级所有项目。框架加载顺序：`./myphp`（打包独立产物） → `$MYPHP_HOME`（`myphp dev / run / test / screenshot` 自动设为命令自己那份） → `myphp.json` 中的 `framework` 配置；都没有就抛错。`myphp.json` 的 `"myphp"` 是项目需要的最低框架版本，不满足时 `myphp` 命令会提示 `myphp upgrade`。不要把 `owner888/myphp` 加回 `composer.json`，也不要直接 `php tests/ui_test.php`（用 `myphp test`）。
 2. **`view.php` 跨端布局规范**
    - 顶层采用 `TabView(...)->tabViewStyle(TabViewStyle::sidebarAdaptable)`，不要手写自定义侧边栏替代系统自适应导航，以保持 macOS 毛玻璃侧边栏、Windows 11 Mica 侧边栏、iPadOS/Android Pad 横屏收起侧边栏自动变形为悬浮胶囊栏的原生行为。
    - 顶部选择器（市场、规模、品种、周期）分为上下两行均衡 `HStack` 排列，防止在窄屏或平板分屏下发生水平裁切。
@@ -105,16 +105,16 @@ native/quant_sweep.c (g_datasets[64] 常驻 C 侧列式数组 + Wilder ATR(14) �
 # ./scripts/build_native.sh darwin-arm64 darwin-amd64 linux-arm64 linux-amd64 windows-amd64
 
 # 2. 重新生成 PHP FFI 绑定类（若修改了 quant_sweep.h 签名或宏常量）
-./vendor/bin/myphp generate .
+myphp generate .
 
 # 3. 运行无头全链路回归测试（校验 FFI 版本、100 万根 SoA 堆增量 <1MB、LOD <1ms 及平板侧边栏变形）
-php -d ffi.enable=1 tests/ui_test.php
+myphp test
 ```
 
 ### 修改了 PHP 业务或 `view.php` UI 时：
 ```bash
 # 必须保证 strict 模式下的桌面与平板 Headless 测试 0 失败
-php -d ffi.enable=1 tests/ui_test.php
+myphp test
 ```
 
 ### 每新增功能或修改跨端 UI / 内核后的四端标准验收流程
@@ -122,19 +122,19 @@ php -d ffi.enable=1 tests/ui_test.php
 每次新增功能或改动跨平台交互后，Coding Agent 应按以下顺序完成四端回归，不手跑底层 `xcrun` / `adb` 脚本：
 
 1. **通用无头回归（`< 100ms`，每次必跑）**
-   - 对所有改动 PHP 文件执行 `php -l`，再运行 `php -d ffi.enable=1 tests/ui_test.php`（同时覆盖桌面端与平板端 `strict` Key 检查、FFI 版本校验、100 万根 K 线 SoA 堆增量 `< 1MB` 及无 FFI 纯 PHP 降级）。
+   - 对所有改动 PHP 文件执行 `php -l`，再运行 `myphp test`（同时覆盖桌面端与平板端 `strict` Key 检查、FFI 版本校验、100 万根 K 线 SoA 堆增量 `< 1MB` 及无 FFI 纯 PHP 降级）。
 2. **macOS（Metal + 毛玻璃侧边栏）**
    - 桌面与移动视口截图走查：
      ```bash
-     ./vendor/bin/myphp screenshot -size 1280x800 -theme dark -out /tmp/myquant-macos.png .
-     ./vendor/bin/myphp screenshot -size 402x874 -theme light -out /tmp/myquant-mobile.png .
+     myphp screenshot -size 1280x800 -theme dark -out /tmp/myquant-macos.png .
+     myphp screenshot -size 402x874 -theme light -out /tmp/myquant-mobile.png .
      ```
-   - 热重载或打包校验：`./vendor/bin/myphp run -d macos .`、`./vendor/bin/myphp build -platform darwin/arm64 .`。
+   - 热重载或打包校验：`myphp run -d macos .`、`myphp build -platform darwin/arm64 .`。
 3. **Windows（本地 Windows VM，通过免密 SSH 别名如 `ssh win` 联调）**
    - **为什么在 Windows 内原生编译与截图**：`myphp build` 的 Windows 产物需直接携带宿主 Windows 的 `php.exe` 与 `ext/*.dll`，并调用本地 C 编译器（`gcc` / `clang` / `cl`）生成无控制台 GUI 启动器 `MyQuant.exe`，不支持从 macOS 交叉打包整个 Windows 应用。因此在装有 PHP 8.4/8.5（开启 `ffi`、`sqlite3`、`pdo_sqlite`、`curl`、`mbstring`、`openssl`）与轻量 MinGW/LLVM-MinGW 的 Windows VM 内完成编译、测试与截图。
    - **代码同步与 SSH 无头测试 / 打包**：将宿主改动同步至 VM 工作目录后执行：
      ```bash
-     ssh win "cd %USERPROFILE%\myquant && php -d ffi.enable=1 tests\ui_test.php"
+     ssh win "cd %USERPROFILE%\myquant && ..\myphp\bin\myphp.cmd test"
      ssh win "cd %USERPROFILE%\myquant && ..\myphp\bin\myphp.cmd build -skip-installer ."
      ```
    - **D3D11 + Win11 Mica 真实窗口截图回传**：OpenSSH 会话默认位于后台非交互会话（Session 0），无法直接访问桌面 DWM；通过计划任务 `/IT` 在已登录交互桌面触发 `myphp.cmd screenshot`，再拉回宿主机做视觉检查：
@@ -143,8 +143,8 @@ php -d ffi.enable=1 tests/ui_test.php
      scp win:C:/Windows/Temp/myquant-win.png /tmp/myquant-win.png
      ```
 4. **iOS / iPadOS（Metal + UIKit 安全区与自适应导航）**
-   - 查看可用设备：`./vendor/bin/myphp devices`（首次跑模拟器前确保宿主已安装 `autoconf automake libtool pkg-config bison re2c` 以构建模拟器 `libphp.a`）。
-   - 启动并检查日志：`./vendor/bin/myphp run -d ios .`，重点验证灵动岛/底部安全区、横竖屏旋转及 iPad 横屏侧边栏 ↔ 竖屏顶部悬浮胶囊栏变形；发版构建校验：`./vendor/bin/myphp build -platform ios/arm64 .`。
+   - 查看可用设备：`myphp devices`（首次跑模拟器前确保宿主已安装 `autoconf automake libtool pkg-config bison re2c` 以构建模拟器 `libphp.a`）。
+   - 启动并检查日志：`myphp run -d ios .`，重点验证灵动岛/底部安全区、横竖屏旋转及 iPad 横屏侧边栏 ↔ 竖屏顶部悬浮胶囊栏变形；发版构建校验：`myphp build -platform ios/arm64 .`。
 5. **Android（EGL / GLES 3 + 16KB 页对齐与 Enforcing SELinux）**
-   - 启动 `SELinux = Enforcing` 标准镜像模拟器（`./vendor/bin/myphp emulators --launch <id>`）或连接非 root 真机。
-   - 安装运行并流式检查日志：`./vendor/bin/myphp run -d android .`（确认无 `avc: denied` 或 PHP 告警）；发版构建校验：`./vendor/bin/myphp build -platform android/arm64 .`（若附带 `android/jniLibs/arm64-v8a/libquant_sweep.so`，编译时必须传入 `-Wl,-z,max-page-size=16384`）。
+   - 启动 `SELinux = Enforcing` 标准镜像模拟器（`myphp emulators --launch <id>`）或连接非 root 真机。
+   - 安装运行并流式检查日志：`myphp run -d android .`（确认无 `avc: denied` 或 PHP 告警）；发版构建校验：`myphp build -platform android/arm64 .`（若附带 `android/jniLibs/arm64-v8a/libquant_sweep.so`，编译时必须传入 `-Wl,-z,max-page-size=16384`）。
