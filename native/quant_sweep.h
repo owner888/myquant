@@ -13,11 +13,15 @@
 extern "C" {
 #endif
 
-#define MQ_SWEEP_VERSION 2
+#define MQ_SWEEP_VERSION 3
 #define MQ_METRICS_STRIDE 8
 #define MQ_BACKTEST_SUMMARY_LEN 14
 #define MQ_TRADE_STRIDE 8
 #define MQ_ATR_PERIOD 14
+
+#define MQ_DIR_LONG 1
+#define MQ_DIR_BOTH 0
+#define MQ_DIR_SHORT -1
 
 MQ_EXPORT int mq_sweep_version(void);
 MQ_EXPORT int mq_cpu_threads(void);
@@ -34,6 +38,21 @@ MQ_EXPORT int mq_dataset_alloc(
     int n_candles
 );
 
+MQ_EXPORT int mq_dataset_create_empty(int initial_cap);
+
+MQ_EXPORT int mq_dataset_append_batch(
+    int ds_id,
+    const int64_t *open_time_ms,
+    const double *opens,
+    const double *highs,
+    const double *lows,
+    const double *closes,
+    const double *volumes,
+    int n_candles
+);
+
+MQ_EXPORT int mq_dataset_finalize(int ds_id);
+
 MQ_EXPORT int mq_dataset_generate_mock(
     int n_candles,
     double base_price,
@@ -46,6 +65,12 @@ MQ_EXPORT int mq_dataset_generate_mock(
 MQ_EXPORT void mq_dataset_free(int ds_id);
 MQ_EXPORT int mq_dataset_count(int ds_id);
 MQ_EXPORT int64_t mq_dataset_memory_bytes(int ds_id);
+
+MQ_EXPORT int mq_dataset_get_last(
+    int ds_id,
+    int64_t *out_open_time_ms,
+    double *out_ohlcv
+);
 
 MQ_EXPORT int mq_dataset_update_last(
     int ds_id,
@@ -81,6 +106,7 @@ MQ_EXPORT int mq_backtest_on_dataset(
     double fee_rate,
     double risk_pct,
     double max_leverage,
+    int direction,
     double *out_summary,
     double *out_xs,
     double *out_strategy_ys,
@@ -103,6 +129,7 @@ MQ_EXPORT int mq_sweep_on_dataset(
     double fee_rate,
     double risk_pct,
     double max_leverage,
+    int direction,
     int n_threads,
     double *out_metrics,
     int max_combos

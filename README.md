@@ -11,13 +11,14 @@
    - **加密市场（Binance）**：支持 `BTCUSDT` / `ETHUSDT` / `SOLUSDT` / `PAXGUSDT` 线上实时 K 线拉取（`5m` / `15m` / `1h` / `4h` / `1d`）与本地 SQLite 事务缓存（默认 `8.0 bps` 单边真实 Taker + 滑点摩擦）。
    - **离线确定性基准行情**：首次离线启动自动生成多阶段（趋势 + 盘整 + 突破）基准行情并落盘 SQLite，无网络依赖即可开箱运行。
 
-2. **正交策略与「以损定量」风控引擎**
-   - **零未来函数事件驱动**：快慢 EMA 趋势信号 + Wilder `ATR(14)` 移动硬止损（Trailing Hard-Stop）。
+2. **正交多空策略与「以损定量」风控引擎**
+   - **零未来函数事件驱动（支持多空双向）**：快慢 EMA 趋势信号 + Wilder `ATR(14)` 移动硬止损（含跳空高低点真实滑点撮合），支持 **仅做多（Long）**、**多空双向反转（Both）** 与 **仅做空（Short）**。
    - **固定风险百分比头寸管理（Position Sizing）**：单笔开仓数量由 `净值 × 单笔风险% ÷ ATR止损距离` 反推，并受市场最大杠杆上限约束（黄金外汇 `3.0x`、加密现货 `1.0x`）。
    - **全维度体检与摩擦归因**：实时计算净收益率（对比 Buy & Hold）、Profit Factor、最大回撤、Calmar 比率、单笔期望 R 倍数（Expectancy R）以及手续费吞噬毛利占比告警。
 
-3. **v2 零拷贝 C Columnar SoA 存储 + O(log N) 二叉 LOD 金字塔**
-   - K 线通过 `DatasetHandle` 一次性上传（或直接在 C 端生成 `10 万` / `100 万` 根压测序列）至 C 侧列式数组（`time_ms`, `open`, `high`, `low`, `close`, `volume`, 预计算 `atr`），PHP 堆**零 `Candle` 对象驻留**。
+3. **v3 零拷贝 C Columnar SoA 存储 + SQLite 流式落盘 + 实时增量流**
+   - 本地大体积 Exness Tick ZIP / MT5 CSV 无条数上限，按 `4096` 根分块流式同步写入 **SQLite 事务仓库** 与 **C 侧列式数组**（`time_ms`, `open`, `high`, `low`, `close`, `volume`, 预计算 `atr`），PHP 堆**零全量 `Candle` 数组驻留**。
+   - 支持 **实时增量流**（`mq_dataset_update_last`）：在线拉取最新 K 线或离线微 Tick 演进，按 `O(log N)` 沿 LOD 二叉金字塔右脊实时更新极值与策略净值。
    - 同步构建最高 20 层 `float32` 二叉 OHLC 极值金字塔（采用 `nextafterf` 向上/向下保包络舍入，确保缩略图绝不丢失极值针尖），支持任意视口平移与缩放（`viewStartPct` / `viewSpanPct`），单次 `O(log N)` 视口查询低于 **10 µs**。
 
 4. **多核并行三维网格扫描 +「参数高原 vs 孤岛尖峰」过拟合检测**
@@ -108,6 +109,7 @@ php -d ffi.enable=1 tests/ui_test.php
 | 变量名 | 可选值 / 说明 |
 | --- | --- |
 | `MYQUANT_SCALE` | `live`（默认，SQLite/实盘行情）、`100k`（启动即在 C 侧生成 10 万根 K 线）、`1m`（启动即生成 100 万根 K 线） |
+| `MYQUANT_DIR` | `long`（默认，仅做多）、`both`（多空双向反转）、`short`（仅做空） |
 | `MYQUANT_TAB` | `lab`（回测实验室）、`sweep`（C 原生参数高原）、`journal`（成交账本与摩擦）、`guide`（量化手册） |
 | `MYPHP_HOME` | 指向本地 MyPHP 框架源码目录时，`boot.php` 会优先于 `vendor/owner888/myphp` 加载，便于框架联调 |
 
@@ -115,7 +117,7 @@ php -d ffi.enable=1 tests/ui_test.php
 
 ## 本地历史数据导入格式
 
-在「回测实验室」底部的导入栏填入本地文件路径即可导入并自动缓存至 SQLite：
+在「回测实验室」底部点击 **「导入数据」** 按钮（或将文件拖放到应用图标），通过系统原生文件选择器选取文件即可流式写入 SQLite + C SoA：
 
 1. **Exness 官方 Tick 压缩包 / CSV**（如 `Exness_XAUUSD_2026_05.zip`）
    - 首行包含 `Bid` 与 `Ask` 列（格式：`"Exness","Symbol","Timestamp","Bid","Ask"`），导入器会自动取 `(Bid + Ask) / 2` 中间价并按当前选定周期（如 `5m` / `15m` / `1h`）聚合成 OHLCV K 线。

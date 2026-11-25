@@ -11,6 +11,7 @@
 #else
 #include <pthread.h>
 #include <unistd.h>
+#undef MQ_EXPORT
 #define MQ_EXPORT __attribute__((visibility("default")))
 #endif
 
@@ -20,6 +21,7 @@
 
 typedef struct {
     int len;
+    int cap;
     float *open;
     float *high;
     float *low;
@@ -75,7 +77,9 @@ static void compute_atr_column(MqDataset *ds) {
     int n = ds->len;
     if (n <= 0) return;
     double tr0 = ds->high[0] - ds->low[0];
-    if (tr0 <= 0.0) tr0 = fabs(ds->close[0]) * 0.001 + 1e-6;
+    double floor0 = fabs(ds->close[0]) * 0.001;
+    if (tr0 < floor0) tr0 = floor0;
+    if (tr0 <= 0.0) tr0 = 1e-6;
     ds->atr[0] = tr0;
     double tr_sum = tr0;
     for (int i = 1; i < n; i++) {
@@ -108,15 +112,20 @@ static int build_lod_pyramid(MqDataset *ds) {
     free_lod(ds);
     if (ds->len < 8) return 0;
 
+    int raw_cap = ds->cap > ds->len ? ds->cap : ds->len;
+
     /* Level 0 (shift=2 => 4 raw bars per bucket) */
     int b_len = (ds->len + 3) >> 2;
+    int b_cap = (raw_cap + 3) >> 2;
+    if (b_cap < b_len) b_cap = b_len;
     MqLodLevel *lv0 = &ds->lod[0];
     lv0->len = b_len;
-    lv0->open = (float *)malloc((size_t)b_len * sizeof(float));
-    lv0->high = (float *)malloc((size_t)b_len * sizeof(float));
-    lv0->low = (float *)malloc((size_t)b_len * sizeof(float));
-    lv0->close = (float *)malloc((size_t)b_len * sizeof(float));
-    lv0->volume = (float *)malloc((size_t)b_len * sizeof(float));
+    lv0->cap = b_cap;
+    lv0->open = (float *)malloc((size_t)b_cap * sizeof(float));
+    lv0->high = (float *)malloc((size_t)b_cap * sizeof(float));
+    lv0->low = (float *)malloc((size_t)b_cap * sizeof(float));
+    lv0->close = (float *)malloc((size_t)b_cap * sizeof(float));
+    lv0->volume = (float *)malloc((size_t)b_cap * sizeof(float));
     if (!lv0->open || !lv0->high || !lv0->low || !lv0->close || !lv0->volume) {
         free_lod(ds);
         return -1;
@@ -144,15 +153,19 @@ static int build_lod_pyramid(MqDataset *ds) {
 
     while (ds->n_lod < MQ_MAX_LOD_LEVELS) {
         MqLodLevel *prev = &ds->lod[ds->n_lod - 1];
-        if (prev->len <= 2) break;
+        if (prev->cap <= 2 && prev->len <= 2) break;
         int n_b = (prev->len + 1) >> 1;
+        int n_cap = (prev->cap + 1) >> 1;
+        if (n_cap < n_b) n_cap = n_b;
+        if (n_b < 1) break;
         MqLodLevel *cur = &ds->lod[ds->n_lod];
         cur->len = n_b;
-        cur->open = (float *)malloc((size_t)n_b * sizeof(float));
-        cur->high = (float *)malloc((size_t)n_b * sizeof(float));
-        cur->low = (float *)malloc((size_t)n_b * sizeof(float));
-        cur->close = (float *)malloc((size_t)n_b * sizeof(float));
-        cur->volume = (float *)malloc((size_t)n_b * sizeof(float));
+        cur->cap = n_cap;
+        cur->open = (float *)malloc((size_t)n_cap * sizeof(float));
+        cur->high = (float *)malloc((size_t)n_cap * sizeof(float));
+        cur->low = (float *)malloc((size_t)n_cap * sizeof(float));
+        cur->close = (float *)malloc((size_t)n_cap * sizeof(float));
+        cur->volume = (float *)malloc((size_t)n_cap * sizeof(float));
         if (!cur->open || !cur->high || !cur->low || !cur->close || !cur->volume) {
             break;
         }
@@ -174,12 +187,13 @@ static int build_lod_pyramid(MqDataset *ds) {
             }
         }
         ds->n_lod++;
+        if (cur->len <= 2 && cur->cap <= 4) break;
     }
     return 0;
 }
 
-static int reserve_dataset_slot(int n_candles) {
-    if (n_candles <= 0) return -1;
+static int reserve_dataset_slot(int initial_len, int initial_cap) {
+    if (initial_len < 0) return -1;
     int slot = -1;
     for (int i = 1; i < MQ_MAX_DATASETS; i++) {
         if (!g_datasets[i].in_use) {
@@ -191,7 +205,9 @@ static int reserve_dataset_slot(int n_candles) {
 
     MqDataset *ds = &g_datasets[slot];
     memset(ds, 0, sizeof(MqDataset));
-    int cap = n_candles + 64; /* spare tail room for O(log N) live tick appends */
+    int cap = initial_cap > initial_len + 256 ? initial_cap : (initial_len + 256);
+    if (cap < 256) cap = 256;
+
     ds->time_ms = (int64_t *)malloc((size_t)cap * sizeof(int64_t));
     ds->open = (double *)malloc((size_t)cap * sizeof(double));
     ds->high = (double *)malloc((size_t)cap * sizeof(double));
@@ -204,9 +220,48 @@ static int reserve_dataset_slot(int n_candles) {
         return -3;
     }
     ds->in_use = 1;
-    ds->len = n_candles;
+    ds->len = initial_len;
     ds->cap = cap;
     return slot;
+}
+
+static int ensure_dataset_capacity(MqDataset *ds, int needed_len) {
+    if (needed_len <= ds->cap) return 0;
+    int new_cap = ds->cap < 1024 ? 1024 : ds->cap;
+    while (new_cap < needed_len) {
+        new_cap = new_cap < (1 << 20) ? (new_cap * 2) : (new_cap + (1 << 19));
+    }
+
+    int64_t *t = (int64_t *)realloc(ds->time_ms, (size_t)new_cap * sizeof(int64_t));
+    if (!t) return -1;
+    ds->time_ms = t;
+
+    double *o = (double *)realloc(ds->open, (size_t)new_cap * sizeof(double));
+    if (!o) return -1;
+    ds->open = o;
+
+    double *h = (double *)realloc(ds->high, (size_t)new_cap * sizeof(double));
+    if (!h) return -1;
+    ds->high = h;
+
+    double *l = (double *)realloc(ds->low, (size_t)new_cap * sizeof(double));
+    if (!l) return -1;
+    ds->low = l;
+
+    double *c = (double *)realloc(ds->close, (size_t)new_cap * sizeof(double));
+    if (!c) return -1;
+    ds->close = c;
+
+    double *v = (double *)realloc(ds->volume, (size_t)new_cap * sizeof(double));
+    if (!v) return -1;
+    ds->volume = v;
+
+    double *a = (double *)realloc(ds->atr, (size_t)new_cap * sizeof(double));
+    if (!a) return -1;
+    ds->atr = a;
+
+    ds->cap = new_cap;
+    return 1; /* 1 indicates capacity was expanded */
 }
 
 static MqDataset *get_dataset(int ds_id) {
@@ -240,7 +295,7 @@ MQ_EXPORT int mq_dataset_alloc(
     int n_candles
 ) {
     if (!opens || !highs || !lows || !closes || n_candles <= 0) return -1;
-    int slot = reserve_dataset_slot(n_candles);
+    int slot = reserve_dataset_slot(n_candles, n_candles + 256);
     if (slot < 0) return slot;
     MqDataset *ds = &g_datasets[slot];
     size_t bytes = (size_t)n_candles * sizeof(double);
@@ -263,6 +318,53 @@ MQ_EXPORT int mq_dataset_alloc(
     return slot;
 }
 
+MQ_EXPORT int mq_dataset_create_empty(int initial_cap) {
+    return reserve_dataset_slot(0, initial_cap > 256 ? initial_cap : 4096);
+}
+
+MQ_EXPORT int mq_dataset_append_batch(
+    int ds_id,
+    const int64_t *open_time_ms,
+    const double *opens,
+    const double *highs,
+    const double *lows,
+    const double *closes,
+    const double *volumes,
+    int n_candles
+) {
+    MqDataset *ds = get_dataset(ds_id);
+    if (!ds || !opens || !highs || !lows || !closes || n_candles <= 0) return -1;
+    if (ensure_dataset_capacity(ds, ds->len + n_candles) < 0) return -2;
+
+    int base = ds->len;
+    size_t bytes = (size_t)n_candles * sizeof(double);
+    if (open_time_ms) {
+        memcpy(&ds->time_ms[base], open_time_ms, (size_t)n_candles * sizeof(int64_t));
+    } else {
+        int64_t t0 = base > 0 ? (ds->time_ms[base - 1] + 60000LL) : 0LL;
+        for (int i = 0; i < n_candles; i++) ds->time_ms[base + i] = t0 + (int64_t)i * 60000LL;
+    }
+    memcpy(&ds->open[base], opens, bytes);
+    memcpy(&ds->high[base], highs, bytes);
+    memcpy(&ds->low[base], lows, bytes);
+    memcpy(&ds->close[base], closes, bytes);
+    if (volumes) {
+        memcpy(&ds->volume[base], volumes, bytes);
+    } else {
+        for (int i = 0; i < n_candles; i++) ds->volume[base + i] = 1.0;
+    }
+    ds->len += n_candles;
+    return ds->len;
+}
+
+MQ_EXPORT int mq_dataset_finalize(int ds_id) {
+    MqDataset *ds = get_dataset(ds_id);
+    if (!ds) return -1;
+    compute_atr_column(ds);
+    build_lod_pyramid(ds);
+    return ds->len;
+}
+
 static inline uint64_t splitmix64(uint64_t *state) {
     uint64_t z = (*state += 0x9e3779b97f4a7c15ULL);
     z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
@@ -283,7 +385,7 @@ MQ_EXPORT int mq_dataset_generate_mock(
     uint64_t seed
 ) {
     if (n_candles < 30 || base_price <= 0.0 || bar_volatility <= 0.0) return -1;
-    int slot = reserve_dataset_slot(n_candles);
+    int slot = reserve_dataset_slot(n_candles, n_candles + 256);
     if (slot < 0) return slot;
     MqDataset *ds = &g_datasets[slot];
 
@@ -341,9 +443,28 @@ MQ_EXPORT int64_t mq_dataset_memory_bytes(int ds_id) {
     if (!ds) return 0;
     int64_t total = (int64_t)ds->cap * (sizeof(int64_t) + 6 * sizeof(double));
     for (int i = 0; i < ds->n_lod; i++) {
-        total += (int64_t)ds->lod[i].len * 5 * sizeof(float);
+        total += (int64_t)ds->lod[i].cap * 5 * sizeof(float);
     }
     return total;
+}
+
+MQ_EXPORT int mq_dataset_get_last(
+    int ds_id,
+    int64_t *out_open_time_ms,
+    double *out_ohlcv
+) {
+    MqDataset *ds = get_dataset(ds_id);
+    if (!ds || ds->len <= 0) return -1;
+    int idx = ds->len - 1;
+    if (out_open_time_ms) *out_open_time_ms = ds->time_ms[idx];
+    if (out_ohlcv) {
+        out_ohlcv[0] = ds->open[idx];
+        out_ohlcv[1] = ds->high[idx];
+        out_ohlcv[2] = ds->low[idx];
+        out_ohlcv[3] = ds->close[idx];
+        out_ohlcv[4] = ds->volume[idx];
+    }
+    return ds->len;
 }
 
 /* O(log N) live bar update up the rightmost spine of the LOD pyramid */
@@ -357,15 +478,24 @@ MQ_EXPORT int mq_dataset_update_last(
     double volume
 ) {
     MqDataset *ds = get_dataset(ds_id);
-    if (!ds || ds->len <= 0) return -1;
+    if (!ds) return -1;
 
-    int idx = ds->len - 1;
-    if (open_time_ms > ds->time_ms[idx]) {
-        if (ds->len >= ds->cap) {
-            return -2;
-        }
+    int grew = 0;
+    int idx = 0;
+    if (ds->len == 0) {
+        if (ensure_dataset_capacity(ds, 1) < 0) return -2;
         idx = ds->len++;
+        grew = 1;
+    } else {
+        idx = ds->len - 1;
+        if (open_time_ms > ds->time_ms[idx]) {
+            int rc = ensure_dataset_capacity(ds, ds->len + 1);
+            if (rc < 0) return -2;
+            if (rc > 0) grew = 1;
+            idx = ds->len++;
+        }
     }
+
     ds->time_ms[idx] = open_time_ms;
     ds->open[idx] = open;
     ds->high[idx] = high;
@@ -374,18 +504,39 @@ MQ_EXPORT int mq_dataset_update_last(
     ds->volume[idx] = volume;
 
     if (idx == 0) {
-        ds->atr[0] = high - low > 0.0 ? high - low : close * 0.001;
+        double tr0 = high - low;
+        double floor0 = fabs(close) * 0.001;
+        if (tr0 < floor0) tr0 = floor0;
+        if (tr0 <= 0.0) tr0 = 1e-6;
+        ds->atr[0] = tr0;
     } else {
         double hl = high - low;
         double hc = fabs(high - ds->close[idx - 1]);
         double lc = fabs(low - ds->close[idx - 1]);
         double tr = hl > hc ? (hl > lc ? hl : lc) : (hc > lc ? hc : lc);
-        ds->atr[idx] = (ds->atr[idx - 1] * (MQ_ATR_PERIOD - 1) + tr) / (double)MQ_ATR_PERIOD;
+        if (idx < MQ_ATR_PERIOD) {
+            double tr_sum = ds->atr[0];
+            for (int j = 1; j <= idx; j++) {
+                double jhl = ds->high[j] - ds->low[j];
+                double jhc = fabs(ds->high[j] - ds->close[j - 1]);
+                double jlc = fabs(ds->low[j] - ds->close[j - 1]);
+                tr_sum += jhl > jhc ? (jhl > jlc ? jhl : jlc) : (jhc > jlc ? jhc : jlc);
+            }
+            ds->atr[idx] = tr_sum / (double)(idx + 1);
+        } else {
+            ds->atr[idx] = (ds->atr[idx - 1] * (MQ_ATR_PERIOD - 1) + tr) / (double)MQ_ATR_PERIOD;
+        }
+    }
+
+    int b = idx >> 2;
+    if (grew || (ds->len >= 8 && ds->n_lod == 0) || (ds->n_lod > 0 && b >= ds->lod[0].cap)) {
+        build_lod_pyramid(ds);
+        return ds->len;
     }
 
     /* Update LOD buckets along the rightmost spine in O(log N) */
-    int b = idx >> 2;
-    if (ds->n_lod > 0 && b < ds->lod[0].len) {
+    if (ds->n_lod > 0 && b < ds->lod[0].cap) {
+        if (b >= ds->lod[0].len) ds->lod[0].len = b + 1;
         int s = b << 2;
         int e = s + 4;
         if (e > ds->len) e = ds->len;
@@ -403,7 +554,11 @@ MQ_EXPORT int mq_dataset_update_last(
 
         for (int lv = 1; lv < ds->n_lod; lv++) {
             b >>= 1;
-            if (b >= ds->lod[lv].len) break;
+            if (b >= ds->lod[lv].cap) {
+                build_lod_pyramid(ds);
+                break;
+            }
+            if (b >= ds->lod[lv].len) ds->lod[lv].len = b + 1;
             MqLodLevel *prev = &ds->lod[lv - 1];
             MqLodLevel *cur = &ds->lod[lv];
             int c0 = b << 1, c1 = c0 + 1;
@@ -550,7 +705,7 @@ MQ_EXPORT int mq_dataset_query_lod(
     return k;
 }
 
-/* ---- Zero-Copy Full Backtest on Resident SoA Dataset ---- */
+/* ---- Zero-Copy Full Backtest on Resident SoA Dataset (Long / Short / Both) ---- */
 
 MQ_EXPORT int mq_backtest_on_dataset(
     int ds_id,
@@ -561,6 +716,7 @@ MQ_EXPORT int mq_backtest_on_dataset(
     double fee_rate,
     double risk_pct,
     double max_leverage,
+    int direction,
     double *out_summary,
     double *out_xs,
     double *out_strategy_ys,
@@ -581,6 +737,8 @@ MQ_EXPORT int mq_backtest_on_dataset(
     const double *closes = ds->close;
     const double *atr = ds->atr;
     const int64_t *times = ds->time_ms;
+    const int dir_mode = direction > 0 ? 1 : (direction < 0 ? -1 : 0);
+    const double max_lev = max_leverage > 0.1 ? max_leverage : 0.1;
 
     double k_fast = 2.0 / ((double)fast_period + 1.0);
     double k_slow = 2.0 / ((double)slow_period + 1.0);
@@ -588,9 +746,9 @@ MQ_EXPORT int mq_backtest_on_dataset(
     double ema_s = closes[0];
     int prev_bull = 0;
 
-    double cash = initial_equity;
+    double balance = initial_equity;
+    int pos_dir = 0; /* 0: flat, 1: long, -1: short */
     double qty = 0.0;
-    double entry_cost = 0.0;
     double entry_price = 0.0;
     double entry_fee = 0.0;
     double risk_dollars = 0.0;
@@ -613,7 +771,6 @@ MQ_EXPORT int mq_backtest_on_dataset(
     int curve_stride = max_curve_pts > 1 ? ((n - 1) / (max_curve_pts - 1)) : n;
     if (curve_stride < 1) curve_stride = 1;
     int curve_len = 0;
-    double y_min = initial_equity, y_max = initial_equity, dd_min = -1.0;
     double first_close = closes[0] > 1e-9 ? closes[0] : 1.0;
 
     if (max_curve_pts > 0 && out_xs && out_strategy_ys && out_hold_ys && out_drawdown_ys) {
@@ -629,19 +786,40 @@ MQ_EXPORT int mq_backtest_on_dataset(
         ema_f = (price - ema_f) * k_fast + ema_f;
         ema_s = (price - ema_s) * k_slow + ema_s;
         int bull = ema_f > ema_s ? 1 : 0;
+        int cross_bull = (prev_bull == 0 && bull == 1) ? 1 : 0;
+        int cross_bear = (prev_bull == 1 && bull == 0) ? 1 : 0;
 
-        if (qty > 0.0) {
-            double cand_stop = price - atr_mult * atr[i];
-            if (cand_stop > stop_price) stop_price = cand_stop;
-            int hit_stop = lows[i] <= stop_price ? 1 : 0;
-            int flip_bear = (prev_bull == 1 && bull == 0) ? 1 : 0;
+        /* 1. Manage / close existing position */
+        if (pos_dir != 0) {
+            int hit_stop = 0;
+            int flip_exit = 0;
+            double raw_exit = price;
 
-            if (hit_stop || flip_bear) {
-                double raw_exit = hit_stop ? (stop_price < highs[i] ? stop_price : price) : price;
+            if (pos_dir == 1) {
+                double cand_stop = price - atr_mult * atr[i];
+                if (cand_stop > stop_price) stop_price = cand_stop;
+                hit_stop = lows[i] <= stop_price ? 1 : 0;
+                flip_exit = cross_bear;
+                if (hit_stop) {
+                    /* Gap-down fill: cannot fill better than current bar high */
+                    raw_exit = stop_price < highs[i] ? stop_price : highs[i];
+                }
+            } else {
+                double cand_stop = price + atr_mult * atr[i];
+                if (cand_stop < stop_price) stop_price = cand_stop;
+                hit_stop = highs[i] >= stop_price ? 1 : 0;
+                flip_exit = cross_bull;
+                if (hit_stop) {
+                    /* Gap-up fill: cannot fill better than current bar low */
+                    raw_exit = stop_price > lows[i] ? stop_price : lows[i];
+                }
+            }
+
+            if (hit_stop || flip_exit) {
                 double exit_fee = qty * raw_exit * fee_rate;
-                double proceeds = qty * raw_exit - exit_fee;
-                double pnl = proceeds - entry_cost;
-                double trade_fee = entry_fee + exit_fee;
+                double pnl = pos_dir == 1
+                    ? (qty * (raw_exit - entry_price) - entry_fee - exit_fee)
+                    : (qty * (entry_price - raw_exit) - entry_fee - exit_fee);
                 total_fees += exit_fee;
                 double r_mult = risk_dollars > 1e-6 ? (pnl / risk_dollars) : 0.0;
                 r_sum += r_mult;
@@ -655,6 +833,7 @@ MQ_EXPORT int mq_backtest_on_dataset(
 
                 if (trade_ring) {
                     int slot = (closed % trade_ring_cap) * MQ_TRADE_STRIDE;
+                    double reason_code = (double)pos_dir * (hit_stop ? 1.0 : 2.0);
                     trade_ring[slot + 0] = (double)(closed + 1);
                     trade_ring[slot + 1] = (double)entry_time_ms;
                     trade_ring[slot + 2] = (double)times[i];
@@ -662,41 +841,55 @@ MQ_EXPORT int mq_backtest_on_dataset(
                     trade_ring[slot + 4] = raw_exit;
                     trade_ring[slot + 5] = pnl;
                     trade_ring[slot + 6] = r_mult;
-                    trade_ring[slot + 7] = hit_stop ? 1.0 : 0.0;
+                    trade_ring[slot + 7] = reason_code;
                 }
-                (void)trade_fee;
                 closed++;
-                cash += proceeds;
+                balance += pnl;
+                if (balance < 0.0) balance = 0.0;
+                pos_dir = 0;
                 qty = 0.0;
-                entry_cost = 0.0;
-            }
-        } else if (i >= slow_period && prev_bull == 0 && bull == 1 && cash > 0.0) {
-            double exec_entry = price * (1.0 + fee_rate);
-            double stop_dist = atr_mult * atr[i];
-            if (stop_dist < price * 0.002) stop_dist = price * 0.002;
-            double risk_budget = cash * risk_pct;
-            double desired_qty = risk_budget / stop_dist;
-            double max_notional = cash * (max_leverage > 0.1 ? max_leverage : 0.1);
-            double notional = desired_qty * exec_entry;
-            if (notional > max_notional) {
-                notional = max_notional;
-                desired_qty = notional / exec_entry;
-            }
-            if (desired_qty > 0.0 && notional > 1.0) {
-                qty = desired_qty;
-                entry_cost = notional;
-                entry_price = price;
-                entry_time_ms = times[i];
-                entry_fee = desired_qty * price * fee_rate;
-                total_fees += entry_fee;
-                risk_dollars = desired_qty * stop_dist;
-                if (risk_dollars < 1.0) risk_dollars = 1.0;
-                cash -= notional;
-                stop_price = price - stop_dist;
             }
         }
 
-        double eq = cash + (qty > 0.0 ? qty * price * (1.0 - fee_rate) : 0.0);
+        /* 2. Open new position (or reverse immediately on opposite crossover in MQ_DIR_BOTH mode) */
+        if (pos_dir == 0 && i >= slow_period && balance > 0.0) {
+            int want_dir = 0;
+            if (cross_bull && dir_mode >= 0) want_dir = 1;
+            else if (cross_bear && dir_mode <= 0) want_dir = -1;
+
+            if (want_dir != 0) {
+                double exec_entry = price * (1.0 + fee_rate);
+                double stop_dist = atr_mult * atr[i];
+                if (stop_dist < price * 0.002) stop_dist = price * 0.002;
+                double desired_qty = (balance * risk_pct) / stop_dist;
+                double max_notional = balance * max_lev;
+                double notional = desired_qty * exec_entry;
+                if (notional > max_notional) {
+                    notional = max_notional;
+                    desired_qty = notional / exec_entry;
+                }
+                if (desired_qty > 0.0 && notional > 1.0) {
+                    pos_dir = want_dir;
+                    qty = desired_qty;
+                    entry_price = price;
+                    entry_time_ms = times[i];
+                    entry_fee = desired_qty * price * fee_rate;
+                    total_fees += entry_fee;
+                    risk_dollars = desired_qty * stop_dist;
+                    if (risk_dollars < 1.0) risk_dollars = 1.0;
+                    stop_price = want_dir == 1 ? (price - stop_dist) : (price + stop_dist);
+                }
+            }
+        }
+
+        double eq = balance;
+        if (pos_dir == 1) {
+            eq = balance + qty * (price - entry_price) - entry_fee - qty * price * fee_rate;
+        } else if (pos_dir == -1) {
+            eq = balance + qty * (entry_price - price) - entry_fee - qty * price * fee_rate;
+        }
+        if (eq < 0.0) eq = 0.0;
+
         if (eq > peak_eq) peak_eq = eq;
         double dd = peak_eq > 0.0 ? -(peak_eq - eq) / peak_eq * 100.0 : 0.0;
         if (-dd > max_dd) max_dd = -dd;
@@ -707,20 +900,23 @@ MQ_EXPORT int mq_backtest_on_dataset(
             out_strategy_ys[curve_len] = eq;
             out_hold_ys[curve_len] = bh;
             out_drawdown_ys[curve_len] = dd;
-            if (eq < y_min) y_min = eq;
-            if (bh < y_min) y_min = bh;
-            if (eq > y_max) y_max = eq;
-            if (bh > y_max) y_max = bh;
-            if (dd < dd_min) dd_min = dd;
             curve_len++;
         }
 
         prev_bull = bull;
     }
 
-    double final_eq = cash + (qty > 0.0 ? qty * closes[n - 1] * (1.0 - fee_rate) : 0.0);
+    double last_p = closes[n - 1];
+    double final_eq = balance;
+    if (pos_dir == 1) {
+        final_eq = balance + qty * (last_p - entry_price) - entry_fee - qty * last_p * fee_rate;
+    } else if (pos_dir == -1) {
+        final_eq = balance + qty * (entry_price - last_p) - entry_fee - qty * last_p * fee_rate;
+    }
+    if (final_eq < 0.0) final_eq = 0.0;
+
     double net_ret = (final_eq - initial_equity) / initial_equity * 100.0;
-    double bh_ret = (initial_equity * (closes[n - 1] / first_close) - initial_equity) / initial_equity * 100.0;
+    double bh_ret = (initial_equity * (last_p / first_close) - initial_equity) / initial_equity * 100.0;
     double pf = gross_loss > 1e-6 ? (gross_win / gross_loss) : (gross_win > 0.0 ? 99.9 : 0.0);
     double wr = closed > 0 ? ((double)wins / (double)closed * 100.0) : 0.0;
     double exp_r = closed > 0 ? (r_sum / (double)closed) : 0.0;
@@ -775,6 +971,7 @@ typedef struct {
     double fee_rate;
     double risk_pct;
     double max_leverage;
+    int direction;
     double *out_metrics;
 } MqSweepWorkerArgs;
 
@@ -786,8 +983,9 @@ static void eval_combo_slice(MqSweepWorkerArgs *w) {
     const double *atr = w->atr;
     const double fee_rate = w->fee_rate;
     const double risk_pct = w->risk_pct;
-    const double max_lev = w->max_leverage > 0.0 ? w->max_leverage : 1.0;
+    const double max_lev = w->max_leverage > 0.1 ? w->max_leverage : 0.1;
     const double init_eq = w->initial_equity;
+    const int dir_mode = w->direction > 0 ? 1 : (w->direction < 0 ? -1 : 0);
 
     for (int t = w->start_task; t < w->end_task; t++) {
         int fast_p = w->tasks[t].fast_p;
@@ -797,9 +995,11 @@ static void eval_combo_slice(MqSweepWorkerArgs *w) {
         double k_fast = 2.0 / ((double)fast_p + 1.0);
         double k_slow = 2.0 / ((double)slow_p + 1.0);
 
-        double cash = init_eq;
+        double balance = init_eq;
+        int pos_dir = 0;
         double qty = 0.0;
-        double entry_cost = 0.0;
+        double entry_price = 0.0;
+        double entry_fee = 0.0;
         double stop_price = 0.0;
         double peak_eq = init_eq;
         double max_dd = 0.0;
@@ -817,20 +1017,41 @@ static void eval_combo_slice(MqSweepWorkerArgs *w) {
             ema_f = (price - ema_f) * k_fast + ema_f;
             ema_s = (price - ema_s) * k_slow + ema_s;
             int bull = ema_f > ema_s ? 1 : 0;
+            int cross_bull = (prev_bull == 0 && bull == 1) ? 1 : 0;
+            int cross_bear = (prev_bull == 1 && bull == 0) ? 1 : 0;
 
-            if (qty > 0.0) {
-                double candidate_stop = price - atr_m * atr[i];
-                if (candidate_stop > stop_price) stop_price = candidate_stop;
-                int hit_stop = lows[i] <= stop_price ? 1 : 0;
-                int flip_bear = (prev_bull == 1 && bull == 0) ? 1 : 0;
+            if (pos_dir != 0) {
+                int hit_stop = 0;
+                int flip_exit = 0;
+                double raw_exit = price;
 
-                if (hit_stop || flip_bear) {
-                    double raw_exit = hit_stop ? (stop_price < highs[i] ? stop_price : price) : price;
-                    double proceeds = qty * raw_exit * (1.0 - fee_rate);
-                    double pnl = proceeds - entry_cost;
-                    cash += proceeds;
+                if (pos_dir == 1) {
+                    double candidate_stop = price - atr_m * atr[i];
+                    if (candidate_stop > stop_price) stop_price = candidate_stop;
+                    hit_stop = lows[i] <= stop_price ? 1 : 0;
+                    flip_exit = cross_bear;
+                    if (hit_stop) {
+                        raw_exit = stop_price < highs[i] ? stop_price : highs[i];
+                    }
+                } else {
+                    double candidate_stop = price + atr_m * atr[i];
+                    if (candidate_stop < stop_price) stop_price = candidate_stop;
+                    hit_stop = highs[i] >= stop_price ? 1 : 0;
+                    flip_exit = cross_bull;
+                    if (hit_stop) {
+                        raw_exit = stop_price > lows[i] ? stop_price : lows[i];
+                    }
+                }
+
+                if (hit_stop || flip_exit) {
+                    double exit_fee = qty * raw_exit * fee_rate;
+                    double pnl = pos_dir == 1
+                        ? (qty * (raw_exit - entry_price) - entry_fee - exit_fee)
+                        : (qty * (entry_price - raw_exit) - entry_fee - exit_fee);
+                    balance += pnl;
+                    if (balance < 0.0) balance = 0.0;
+                    pos_dir = 0;
                     qty = 0.0;
-                    entry_cost = 0.0;
                     closed++;
                     if (pnl > 0.0) {
                         wins++;
@@ -839,26 +1060,42 @@ static void eval_combo_slice(MqSweepWorkerArgs *w) {
                         gross_loss += -pnl;
                     }
                 }
-            } else if (i >= slow_p && prev_bull == 0 && bull == 1 && cash > 0.0) {
-                double exec_entry = price * (1.0 + fee_rate);
-                double stop_dist = atr_m * atr[i];
-                if (stop_dist <= price * 1e-5) stop_dist = price * 0.002;
-                double desired_qty = (cash * risk_pct) / stop_dist;
-                double max_notional = cash * max_lev;
-                double notional = desired_qty * exec_entry;
-                if (notional > max_notional) {
-                    notional = max_notional;
-                    desired_qty = notional / exec_entry;
-                }
-                if (desired_qty > 0.0 && notional > 1.0) {
-                    qty = desired_qty;
-                    entry_cost = notional;
-                    cash -= notional;
-                    stop_price = price - stop_dist;
+            }
+
+            if (pos_dir == 0 && i >= slow_p && balance > 0.0) {
+                int want_dir = 0;
+                if (cross_bull && dir_mode >= 0) want_dir = 1;
+                else if (cross_bear && dir_mode <= 0) want_dir = -1;
+
+                if (want_dir != 0) {
+                    double exec_entry = price * (1.0 + fee_rate);
+                    double stop_dist = atr_m * atr[i];
+                    if (stop_dist < price * 0.002) stop_dist = price * 0.002;
+                    double desired_qty = (balance * risk_pct) / stop_dist;
+                    double max_notional = balance * max_lev;
+                    double notional = desired_qty * exec_entry;
+                    if (notional > max_notional) {
+                        notional = max_notional;
+                        desired_qty = notional / exec_entry;
+                    }
+                    if (desired_qty > 0.0 && notional > 1.0) {
+                        pos_dir = want_dir;
+                        qty = desired_qty;
+                        entry_price = price;
+                        entry_fee = desired_qty * price * fee_rate;
+                        stop_price = want_dir == 1 ? (price - stop_dist) : (price + stop_dist);
+                    }
                 }
             }
 
-            double eq = cash + (qty > 0.0 ? qty * price * (1.0 - fee_rate) : 0.0);
+            double eq = balance;
+            if (pos_dir == 1) {
+                eq = balance + qty * (price - entry_price) - entry_fee - qty * price * fee_rate;
+            } else if (pos_dir == -1) {
+                eq = balance + qty * (entry_price - price) - entry_fee - qty * price * fee_rate;
+            }
+            if (eq < 0.0) eq = 0.0;
+
             if (eq > peak_eq) {
                 peak_eq = eq;
             } else if (peak_eq > 0.0) {
@@ -868,9 +1105,17 @@ static void eval_combo_slice(MqSweepWorkerArgs *w) {
             prev_bull = bull;
         }
 
-        double final_eq = cash + (qty > 0.0 ? qty * closes[n - 1] * (1.0 - fee_rate) : 0.0);
+        double last_p = closes[n - 1];
+        double final_eq = balance;
+        if (pos_dir == 1) {
+            final_eq = balance + qty * (last_p - entry_price) - entry_fee - qty * last_p * fee_rate;
+        } else if (pos_dir == -1) {
+            final_eq = balance + qty * (entry_price - last_p) - entry_fee - qty * last_p * fee_rate;
+        }
+        if (final_eq < 0.0) final_eq = 0.0;
+
         double ret_pct = (final_eq - init_eq) / init_eq * 100.0;
-        double pf = gross_loss > 1e-9 ? (gross_win / gross_loss) : (gross_win > 0.0 ? 99.9 : 0.0);
+        double pf = gross_loss > 1e-6 ? (gross_win / gross_loss) : (gross_win > 0.0 ? 99.9 : 0.0);
         double wr = closed > 0 ? ((double)wins / (double)closed * 100.0) : 0.0;
 
         double *row = &w->out_metrics[t * MQ_METRICS_STRIDE];
@@ -913,6 +1158,7 @@ static int run_parallel_sweep(
     double fee_rate,
     double risk_pct,
     double max_leverage,
+    int direction,
     int n_threads,
     double *out_metrics,
     int max_combos
@@ -956,7 +1202,7 @@ static int run_parallel_sweep(
         MqSweepWorkerArgs single = {
             highs, lows, closes, atr, n_candles,
             tasks, 0, total,
-            initial_equity, fee_rate, risk_pct, max_leverage, out_metrics
+            initial_equity, fee_rate, risk_pct, max_leverage, direction, out_metrics
         };
         eval_combo_slice(&single);
         free(tasks);
@@ -973,7 +1219,7 @@ static int run_parallel_sweep(
         args[w] = (MqSweepWorkerArgs){
             highs, lows, closes, atr, n_candles,
             tasks, s, e,
-            initial_equity, fee_rate, risk_pct, max_leverage, out_metrics
+            initial_equity, fee_rate, risk_pct, max_leverage, direction, out_metrics
         };
         if (w == workers - 1) {
             eval_combo_slice(&args[w]);
@@ -996,7 +1242,7 @@ static int run_parallel_sweep(
         args[w] = (MqSweepWorkerArgs){
             highs, lows, closes, atr, n_candles,
             tasks, s, e,
-            initial_equity, fee_rate, risk_pct, max_leverage, out_metrics
+            initial_equity, fee_rate, risk_pct, max_leverage, direction, out_metrics
         };
         if (w == workers - 1) {
             eval_combo_slice(&args[w]);
@@ -1027,6 +1273,7 @@ MQ_EXPORT int mq_sweep_on_dataset(
     double fee_rate,
     double risk_pct,
     double max_leverage,
+    int direction,
     int n_threads,
     double *out_metrics,
     int max_combos
@@ -1044,7 +1291,7 @@ MQ_EXPORT int mq_sweep_on_dataset(
         fast_list, n_fast,
         slow_list, n_slow,
         atr_mults, n_atr,
-        initial_equity, fee_rate, risk_pct, max_leverage,
+        initial_equity, fee_rate, risk_pct, max_leverage, direction,
         n_threads, out_metrics, max_combos
     );
 }
@@ -1077,7 +1324,9 @@ MQ_EXPORT int mq_sweep_ema_atr(
     if (!atr) return -2;
 
     double tr0 = highs[0] - lows[0];
-    if (tr0 <= 0.0) tr0 = closes[0] * 0.001;
+    double floor0 = fabs(closes[0]) * 0.001;
+    if (tr0 < floor0) tr0 = floor0;
+    if (tr0 <= 0.0) tr0 = 1e-6;
     atr[0] = tr0;
     double tr_sum = tr0;
     for (int i = 1; i < n_candles; i++) {
@@ -1096,7 +1345,7 @@ MQ_EXPORT int mq_sweep_ema_atr(
     int written = run_parallel_sweep(
         highs, lows, closes, atr, n_candles,
         fast_list, n_fast, slow_list, n_slow, atr_mults, n_atr,
-        initial_equity, fee_rate, risk_pct, max_leverage,
+        initial_equity, fee_rate, risk_pct, max_leverage, MQ_DIR_LONG,
         0, out_metrics, max_combos
     );
     free(atr);

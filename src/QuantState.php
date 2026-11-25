@@ -3,8 +3,8 @@ declare(strict_types=1);
 
 namespace MyQuant;
 
-use MyPHP\{App, PathName, Window};
-use MyQuant\Data\{CandleStore, DatasetHandle, MarketFeed};
+use MyPHP\{App, Dialog, FileFilter, OpenDialogOptions, PathName, Window};
+use MyQuant\Data\{Candle, CandleStore, DatasetHandle, MarketFeed};
 use MyQuant\Engine\{Backtester, SweepRunner};
 
 final class QuantState
@@ -14,6 +14,7 @@ final class QuantState
     public string $symbol = 'XAUUSDz';
     public string $interval = '15m';
     public string $scaleMode = 'live'; // 'live' (SQLite/API), '100k', '1m'
+    public string $direction = 'long'; // 'long' (1), 'both' (0), 'short' (-1)
 
     public float $fastEma = 12.0;
     public float $slowEma = 36.0;
@@ -26,8 +27,12 @@ final class QuantState
     public float $viewSpanPct = 100.0;
 
     public bool $syncing = false;
+    public bool $importing = false;
+    public bool $streaming = false;
+    public int $streamTicks = 0;
+    public float $lastPrice = 0.0;
     public string $statusText = '';
-    public string $importPath = '';
+    public string $importedFileName = '';
     public ?Window $window = null;
 
     public int $barCount = 0;
@@ -40,6 +45,7 @@ final class QuantState
     private ?CandleStore $store = null;
     private ?DatasetHandle $dataset = null;
     private int $seq = 0;
+    private int $streamSeq = 0;
 
     public function __construct(?string $dbPath = null)
     {
@@ -56,11 +62,30 @@ final class QuantState
         return MarketFeed::MARKETS[$this->market]['symbols'] ?? ['BTCUSDT'];
     }
 
+    public function directionCode(): int
+    {
+        return match ($this->direction) {
+            'short' => Backtester::DIR_SHORT,
+            'both' => Backtester::DIR_BOTH,
+            default => Backtester::DIR_LONG,
+        };
+    }
+
+    public function directionLabel(): string
+    {
+        return match ($this->direction) {
+            'short' => '仅做空',
+            'both' => '多空双向',
+            default => '仅做多',
+        };
+    }
+
     public function switchMarket(string $newMarket): void
     {
         if (!isset(MarketFeed::MARKETS[$newMarket])) {
             return;
         }
+        $this->stopStream(false);
         $this->market = $newMarket;
         $symbols = MarketFeed::MARKETS[$newMarket]['symbols'];
         if (!in_array($this->symbol, $symbols, true)) {
@@ -72,12 +97,14 @@ final class QuantState
 
     public function selectSymbol(string $sym): void
     {
+        $this->stopStream(false);
         $this->symbol = $sym;
         $this->applyScaleOrLoad(false);
     }
 
     public function selectInterval(string $iv): void
     {
+        $this->stopStream(false);
         $this->interval = $iv;
         $this->applyScaleOrLoad(false);
     }
@@ -87,8 +114,26 @@ final class QuantState
         if (!in_array($mode, ['live', '100k', '1m'], true)) {
             return;
         }
+        $this->stopStream(false);
         $this->scaleMode = $mode;
         $this->applyScaleOrLoad(false);
+    }
+
+    public function selectDirection(string $dir): void
+    {
+        if (!in_array($dir, ['long', 'both', 'short'], true)) {
+            return;
+        }
+        $this->direction = $dir;
+        $this->recomputeAll();
+        $this->statusText = sprintf(
+            '策略方向已切换为「%s」 · %s (%s) · %s 根 K 线（净收益 %+.2f%%）',
+            $this->directionLabel(),
+            $this->symbol,
+            $this->interval,
+            number_format($this->barCount),
+            (float)($this->report['netReturnPct'] ?? 0.0),
+        );
     }
 
     private function applyScaleOrLoad(bool $preferOnline): void
@@ -139,25 +184,29 @@ final class QuantState
     public function loadDataset(bool $preferOnline): void
     {
         $this->scaleMode = 'live';
-        $cached = $this->store?->load($this->market, $this->symbol, $this->interval, 1500) ?? [];
-        if ($cached !== [] && !$preferOnline) {
-            $this->installCandles($cached);
-            $this->statusText = sprintf(
-                '本地缓存 → C SoA 驻留 · %s (%s) · %d 根 K 线（PHP 零对象驻留）',
-                $this->symbol,
-                $this->interval,
-                $this->barCount,
-            );
-            $this->recomputeAll();
-            return;
-        }
-
         if (!$preferOnline) {
+            $cachedDs = $this->store?->loadDataset($this->market, $this->symbol, $this->interval);
+            if ($cachedDs !== null && $cachedDs->count > 0) {
+                $this->dataset?->release();
+                $this->dataset = $cachedDs;
+                $this->syncTelemetry();
+                $this->statusText = sprintf(
+                    'SQLite → C SoA 流式驻留 · %s (%s) · %s 根 K 线（PHP 零对象驻留）',
+                    $this->symbol,
+                    $this->interval,
+                    number_format($this->barCount),
+                );
+                $this->recomputeAll();
+                return;
+            }
+            $cachedDs?->release();
+
             $seed = MarketFeed::syntheticDataset($this->market, $this->symbol, $this->interval, 650);
             $this->store?->save($this->market, $this->symbol, $this->interval, $seed);
             $this->installCandles($seed);
+            unset($seed);
             $this->statusText = sprintf(
-                '内置 %s (%s) 基准行情 · %d 根 K 线（点击右上角同步实盘，或切 100万根 压测 C SoA）',
+                '内置 %s (%s) 基准行情 · %d 根 K 线（支持同步实盘 / 实时流 / 100万根压测）',
                 $this->symbol,
                 $this->interval,
                 $this->barCount,
@@ -187,8 +236,14 @@ final class QuantState
             $this->syncing = false;
             if ($fresh !== []) {
                 $this->store?->save($market, $symbol, $interval, $fresh);
-                $this->installCandles($fresh);
-                $this->statusText = sprintf('已同步线上实盘 → C SoA · %s (%s) · %d 根 K 线', $symbol, $interval, $this->barCount);
+                unset($fresh);
+                $mergedDs = $this->store?->loadDataset($market, $symbol, $interval);
+                if ($mergedDs !== null && $mergedDs->count > 0) {
+                    $this->dataset?->release();
+                    $this->dataset = $mergedDs;
+                    $this->syncTelemetry();
+                }
+                $this->statusText = sprintf('已同步线上实盘 → SQLite + C SoA · %s (%s) · %s 根 K 线', $symbol, $interval, number_format($this->barCount));
                 $this->recomputeAll();
             } else {
                 $this->statusText = '线上同步失败（继续使用当前数据）: ' . $err;
@@ -197,9 +252,102 @@ final class QuantState
     }
 
     /**
+     * Toggles the real-time O(log N) incremental stream (`mq_dataset_update_last` + SQLite upsert).
+     */
+    public function toggleStream(): void
+    {
+        if ($this->streaming) {
+            $this->stopStream(true);
+            return;
+        }
+        $this->streaming = true;
+        $mySeq = ++$this->streamSeq;
+        $onlineCapable = App::running() && $this->scaleMode === 'live';
+        $this->stepStream($onlineCapable);
+
+        if (App::running()) {
+            App::go(function () use ($mySeq): void {
+                while ($this->streaming && $mySeq === $this->streamSeq) {
+                    App::sleep(2.0);
+                    if (!$this->streaming || $mySeq !== $this->streamSeq) {
+                        break;
+                    }
+                    $this->stepStream($this->scaleMode === 'live');
+                }
+            });
+        }
+    }
+
+    public function stopStream(bool $updateStatus = true): void
+    {
+        if (!$this->streaming) {
+            return;
+        }
+        $this->streaming = false;
+        ++$this->streamSeq;
+        if ($updateStatus) {
+            $this->statusText = sprintf(
+                '已停止实时增量流 · %s (%s) · 累计推送 %d Tick · 当前 %s 根 K 线',
+                $this->symbol,
+                $this->interval,
+                $this->streamTicks,
+                number_format($this->barCount),
+            );
+        }
+    }
+
+    /**
+     * Applies a single incremental tick or explicit Candle to C SoA (`mq_dataset_update_last`) + SQLite.
+     */
+    public function stepStream(bool $preferOnline = false, ?Candle $explicit = null): void
+    {
+        if ($this->dataset === null) {
+            return;
+        }
+        ++$this->streamTicks;
+        if ($explicit !== null) {
+            $updates = [$explicit];
+            $source = '外部推送流';
+        } else {
+            $last = $this->dataset->lastCandle();
+            $res = MarketFeed::nextStreamTick(
+                $this->market,
+                $this->symbol,
+                $this->interval,
+                $last,
+                $preferOnline,
+                $this->streamTicks,
+            );
+            $updates = $res['candles'];
+            $source = $res['source'];
+        }
+
+        foreach ($updates as $c) {
+            $this->dataset->updateLast($c);
+            $this->lastPrice = $c->close;
+        }
+        if ($this->scaleMode === 'live' && $updates !== []) {
+            $this->store?->save($this->market, $this->symbol, $this->interval, $updates);
+        }
+
+        $this->syncTelemetry();
+        $this->runBacktest();
+        $priceFmt = $this->lastPrice >= 100.0 ? sprintf('%.2f', $this->lastPrice) : sprintf('%.4f', $this->lastPrice);
+        $this->statusText = sprintf(
+            '实时流运行中 (%s #%d) · %s 最新价 %s · %s 根 K 线 · O(log N) LOD %.1f µs',
+            $source,
+            $this->streamTicks,
+            $this->symbol,
+            $priceFmt,
+            number_format($this->barCount),
+            (float)($this->lodView['elapsedUs'] ?? 0.0),
+        );
+    }
+
+    /**
      * Uploads PHP candles into C SoA once and immediately drops the PHP array.
      *
-     * @param list<\MyQuant\Data\Candle> $candles
+     * @param list<Candle> $candles
      */
     private function installCandles(array $candles): void
     {
@@ -213,6 +361,10 @@ final class QuantState
         $this->barCount = $this->dataset?->count ?? 0;
         $this->cMemoryMb = $this->dataset?->cMemoryMb ?? 0.0;
         $this->phpMemoryMb = memory_get_usage() / 1048576.0;
+        $last = $this->dataset?->lastCandle();
+        if ($last !== null) {
+            $this->lastPrice = $last->close;
+        }
         $this->updateViewport();
     }
 
@@ -232,27 +384,73 @@ final class QuantState
         $this->lodView = $this->dataset->queryLod($from, min($this->barCount, $to), 420);
     }
 
-    public function importLocalFile(): void
+    /**
+     * Opens the native OS file picker sheet/dialog to choose a local Exness Tick ZIP or MT5 OHLC CSV.
+     */
+    public function pickAndImportFile(): void
     {
-        $path = trim($this->importPath);
-        if ($path === '') {
-            $this->statusText = '请输入 Exness Tick ZIP 或 MT5 OHLC CSV 路径';
+        if ($this->importing) {
             return;
         }
+        App::go(function (): void {
+            $paths = Dialog::open(new OpenDialogOptions(
+                parent: $this->window,
+                title: '选择 Exness Tick ZIP 或 MT5 OHLC CSV',
+                buttonLabel: '导入行情',
+                filters: [
+                    new FileFilter('历史行情数据 (*.zip, *.csv, *.tsv, *.txt)', ['zip', 'csv', 'tsv', 'txt']),
+                ],
+            ));
+            if ($paths === [] || $paths[0] === '') {
+                return;
+            }
+            $this->importLocalFile($paths[0]);
+        });
+    }
+
+    public function importLocalFile(string $filePath): void
+    {
+        $path = trim($filePath);
+        if ($path === '') {
+            return;
+        }
+        $this->stopStream(false);
+        $this->importing = true;
         try {
-            $imported = MarketFeed::importCsvOrZip($path, $this->interval);
-            if (count($imported) < 30) {
+            $t0 = hrtime(true);
+            $newDs = MarketFeed::importIntoStoreAndDataset(
+                $path,
+                $this->market,
+                $this->symbol,
+                $this->interval,
+                $this->store,
+            );
+            if ($newDs->count < 30) {
+                $newDs->release();
                 $this->statusText = '导入失败：有效 K 线不足 30 根';
                 return;
             }
             $this->scaleMode = 'live';
-            $this->store?->save($this->market, $this->symbol, $this->interval, $imported);
-            $this->installCandles($imported);
-            unset($imported);
-            $this->statusText = sprintf('已导入 %s 根 %s (%s) K 线至 C SoA 内存', number_format($this->barCount), $this->symbol, $this->interval);
+            $this->importedFileName = basename($path);
+            $this->dataset?->release();
+            $this->dataset = $newDs;
+            $importMs = (hrtime(true) - $t0) / 1e6;
+            $this->syncTelemetry();
             $this->recomputeAll();
+            $this->statusText = sprintf(
+                '已导入 %s → SQLite + C SoA · %s 根 %s (%s) K 线（耗时 %.1f ms · C %.1f MB / PHP %.1f MB）',
+                $this->importedFileName,
+                number_format($this->barCount),
+                $this->symbol,
+                $this->interval,
+                $importMs,
+                $this->cMemoryMb,
+                $this->phpMemoryMb,
+            );
         } catch (\Throwable $e) {
             $this->statusText = '导入异常: ' . $e->getMessage();
+        } finally {
+            $this->importing = false;
         }
     }
 
@@ -281,6 +479,7 @@ final class QuantState
             feeRate: max(0.0, $this->feeBps / 10000.0),
             initialEquity: 10000.0,
             maxLeverage: $this->market === 'forex' ? 3.0 : 1.0,
+            direction: $this->directionCode(),
         );
         $this->phpMemoryMb = memory_get_usage() / 1048576.0;
     }
@@ -299,6 +498,7 @@ final class QuantState
             feeRate: max(0.0, $this->feeBps / 10000.0),
             riskPct: max(0.001, $this->riskPct / 100.0),
             maxLeverage: $this->market === 'forex' ? 3.0 : 1.0,
+            direction: $this->directionCode(),
         );
         $this->phpMemoryMb = memory_get_usage() / 1048576.0;
     }
@@ -311,10 +511,11 @@ final class QuantState
         $this->runBacktest();
         $this->tab = 'lab';
         $this->statusText = sprintf(
-            '已套用高原参数：EMA(%d, %d) · ATR %.1fx（%s 根 K 线回测耗时 %.2f ms）',
+            '已套用高原参数：EMA(%d, %d) · ATR %.1fx · %s（%s 根 K 线回测耗时 %.2f ms）',
             $fast,
             $slow,
             $atrMult,
+            $this->directionLabel(),
             number_format($this->barCount),
             (float)($this->report['elapsedMs'] ?? 0.0),
         );

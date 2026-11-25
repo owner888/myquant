@@ -35,19 +35,116 @@ final class DatasetHandle
     }
 
     /**
+     * Allocates an empty resident C SoA dataset for chunked streaming from SQLite or CSV/ZIP.
+     */
+    public static function createEmpty(int $initialCap = 4096): self
+    {
+        $self = new self();
+        if (QuantSweepFfi::available()) {
+            $id = QuantSweepFfi::mq_dataset_create_empty(max(256, $initialCap));
+            if ($id > 0) {
+                $self->id = $id;
+            }
+        }
+        return $self;
+    }
+
+    /**
+     * Appends a columnar chunk directly into resident C SoA memory (zero permanent PHP objects).
+     *
+     * @param list<int> $times
+     * @param list<float> $opens
+     * @param list<float> $highs
+     * @param list<float> $lows
+     * @param list<float> $closes
+     * @param list<float> $vols
+     */
+    public function appendBatch(
+        array $times,
+        array $opens,
+        array $highs,
+        array $lows,
+        array $closes,
+        array $vols,
+    ): void {
+        $n = count($closes);
+        if ($n === 0) {
+            return;
+        }
+        if ($this->id > 0 && QuantSweepFfi::available()) {
+            $ffi = QuantSweepFfi::ffi();
+            $cTimes = $ffi->new("int64_t[$n]");
+            $cOpens = $ffi->new("double[$n]");
+            $cHighs = $ffi->new("double[$n]");
+            $cLows = $ffi->new("double[$n]");
+            $cCloses = $ffi->new("double[$n]");
+            $cVols = $ffi->new("double[$n]");
+            for ($i = 0; $i < $n; $i++) {
+                $cTimes[$i] = $times[$i];
+                $cOpens[$i] = $opens[$i];
+                $cHighs[$i] = $highs[$i];
+                $cLows[$i] = $lows[$i];
+                $cCloses[$i] = $closes[$i];
+                $cVols[$i] = $vols[$i];
+            }
+            $len = QuantSweepFfi::mq_dataset_append_batch(
+                $this->id,
+                FFI::addr($cTimes[0]),
+                FFI::addr($cOpens[0]),
+                FFI::addr($cHighs[0]),
+                FFI::addr($cLows[0]),
+                FFI::addr($cCloses[0]),
+                FFI::addr($cVols[0]),
+                $n,
+            );
+            if ($len >= 0) {
+                $this->count = $len;
+                return;
+            }
+        }
+
+        for ($i = 0; $i < $n; $i++) {
+            $this->fallbackCandles[] = new Candle(
+                $times[$i],
+                $opens[$i],
+                $highs[$i],
+                $lows[$i],
+                $closes[$i],
+                $vols[$i],
+            );
+        }
+        $this->count = count($this->fallbackCandles);
+    }
+
+    /**
+     * Precomputes Wilder ATR(14) and builds the 20-level float32 binary LOD pyramid after batch appends.
+     */
+    public function finalize(): self
+    {
+        if ($this->id > 0 && QuantSweepFfi::available()) {
+            $len = QuantSweepFfi::mq_dataset_finalize($this->id);
+            $this->count = max(0, $len);
+            $this->cMemoryMb = QuantSweepFfi::mq_dataset_memory_bytes($this->id) / 1048576.0;
+        } else {
+            $this->count = count($this->fallbackCandles);
+        }
+        return $this;
+    }
+
+    /**
      * Uploads a PHP Candle[] list once into resident C SoA columns + LOD pyramid,
      * then drops PHP references so subsequent backtests/sweeps/zooms are zero-copy.
      *
      * @param list<Candle> $candles
      */
-    public static function fromCandles(array $candles): self
+    public static function fromCandles(array $candles, bool $forcePhpFallback = false): self
     {
         $self = new self();
         $n = count($candles);
         if ($n === 0) {
             return $self;
         }
-        if (!QuantSweepFfi::available()) {
+        if ($forcePhpFallback || !QuantSweepFfi::available()) {
             $self->count = $n;
             $self->fallbackCandles = $candles;
             return $self;
@@ -115,6 +212,63 @@ final class DatasetHandle
         $self->count = count($fallback);
         $self->fallbackCandles = $fallback;
         return $self;
+    }
+
+    /**
+     * Reads the latest candle in O(1) from C SoA memory (or PHP fallback).
+     */
+    public function lastCandle(): ?Candle
+    {
+        if ($this->id > 0 && QuantSweepFfi::available()) {
+            $ffi = QuantSweepFfi::ffi();
+            $t = $ffi->new('int64_t[1]');
+            $ohlcv = $ffi->new('double[5]');
+            $rc = QuantSweepFfi::mq_dataset_get_last($this->id, FFI::addr($t[0]), FFI::addr($ohlcv[0]));
+            if ($rc > 0) {
+                return new Candle(
+                    (int)$t[0],
+                    (float)$ohlcv[0],
+                    (float)$ohlcv[1],
+                    (float)$ohlcv[2],
+                    (float)$ohlcv[3],
+                    (float)$ohlcv[4],
+                );
+            }
+            return null;
+        }
+        $n = count($this->fallbackCandles);
+        return $n > 0 ? $this->fallbackCandles[$n - 1] : null;
+    }
+
+    /**
+     * Updates the current forming candle or appends a newly opened candle in O(log N) up the C LOD spine.
+     */
+    public function updateLast(Candle $c): void
+    {
+        if ($this->id > 0 && QuantSweepFfi::available()) {
+            $newLen = QuantSweepFfi::mq_dataset_update_last(
+                $this->id,
+                $c->openTimeMs,
+                $c->open,
+                $c->high,
+                $c->low,
+                $c->close,
+                $c->volume,
+            );
+            if ($newLen > 0) {
+                $this->count = $newLen;
+                $this->cMemoryMb = QuantSweepFfi::mq_dataset_memory_bytes($this->id) / 1048576.0;
+                return;
+            }
+        }
+
+        $n = count($this->fallbackCandles);
+        if ($n === 0 || $c->openTimeMs > $this->fallbackCandles[$n - 1]->openTimeMs) {
+            $this->fallbackCandles[] = $c;
+        } else {
+            $this->fallbackCandles[$n - 1] = $c;
+        }
+        $this->count = count($this->fallbackCandles);
     }
 
     /**

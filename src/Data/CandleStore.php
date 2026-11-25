@@ -7,6 +7,9 @@ use MyPHP\Plugins\Sqlite\{Sqlite, Statement, DB};
 
 final class CandleStore
 {
+    private const MULTI_INSERT_ROWS = 300;
+    private const PAGE_SIZE = 4096;
+
     private ?DB $db = null;
 
     public function __construct(private readonly string $dbPath) {}
@@ -38,6 +41,95 @@ final class CandleStore
         return $this->db = $db;
     }
 
+    public function count(string $market, string $symbol, string $interval): int
+    {
+        $rows = $this->conn()->query(
+            'SELECT COUNT(*) FROM candles WHERE market = ? AND symbol = ? AND interval = ?',
+            $market,
+            $symbol,
+            $interval,
+        );
+        return isset($rows->values[0][0]) ? (int)$rows->values[0][0] : 0;
+    }
+
+    /**
+     * Streams persisted SQLite candles in 4096-row pages directly into a C Columnar SoA DatasetHandle
+     * (zero full PHP Candle[] array retained on heap).
+     */
+    public function loadDataset(string $market, string $symbol, string $interval, int $limit = 0): ?DatasetHandle
+    {
+        $total = $this->count($market, $symbol, $interval);
+        if ($total <= 0) {
+            return null;
+        }
+
+        $targetCount = $limit > 0 ? min($total, $limit) : $total;
+        $minOpenTimeMs = -1;
+        if ($limit > 0 && $total > $limit) {
+            $bound = $this->conn()->query(
+                'SELECT open_time_ms FROM candles
+                 WHERE market = ? AND symbol = ? AND interval = ?
+                 ORDER BY open_time_ms DESC
+                 LIMIT 1 OFFSET ?',
+                $market,
+                $symbol,
+                $interval,
+                $limit - 1,
+            );
+            if (isset($bound->values[0][0])) {
+                $minOpenTimeMs = (int)$bound->values[0][0] - 1;
+            }
+        }
+
+        $ds = DatasetHandle::createEmpty($targetCount + 256);
+        $cursor = $minOpenTimeMs;
+        $loaded = 0;
+
+        while ($loaded < $targetCount) {
+            $fetch = min(self::PAGE_SIZE, $targetCount - $loaded);
+            $rows = $this->conn()->query(
+                'SELECT open_time_ms, open, high, low, close, volume
+                 FROM candles
+                 WHERE market = ? AND symbol = ? AND interval = ? AND open_time_ms > ?
+                 ORDER BY open_time_ms ASC
+                 LIMIT ?',
+                $market,
+                $symbol,
+                $interval,
+                $cursor,
+                $fetch,
+            );
+            if ($rows->values === []) {
+                break;
+            }
+
+            $times = [];
+            $opens = [];
+            $highs = [];
+            $lows = [];
+            $closes = [];
+            $vols = [];
+            foreach ($rows->values as $r) {
+                $t = (int)$r[0];
+                $times[] = $t;
+                $opens[] = (float)$r[1];
+                $highs[] = (float)$r[2];
+                $lows[] = (float)$r[3];
+                $closes[] = (float)$r[4];
+                $vols[] = (float)$r[5];
+                $cursor = $t;
+            }
+            $ds->appendBatch($times, $opens, $highs, $lows, $closes, $vols);
+            $loaded += count($times);
+        }
+
+        if ($loaded <= 0) {
+            $ds->release();
+            return null;
+        }
+        return $ds->finalize();
+    }
+
     /**
      * @return list<Candle>
      */
@@ -66,6 +158,56 @@ final class CandleStore
     }
 
     /**
+     * High-throughput multi-row transactional batch insert from columnar arrays.
+     *
+     * @param list<int> $times
+     * @param list<float> $opens
+     * @param list<float> $highs
+     * @param list<float> $lows
+     * @param list<float> $closes
+     * @param list<float> $vols
+     */
+    public function saveRawBatch(
+        string $market,
+        string $symbol,
+        string $interval,
+        array $times,
+        array $opens,
+        array $highs,
+        array $lows,
+        array $closes,
+        array $vols,
+    ): void {
+        $n = count($closes);
+        if ($n === 0) {
+            return;
+        }
+        $stmts = [];
+        for ($offset = 0; $offset < $n; $offset += self::MULTI_INSERT_ROWS) {
+            $end = min($n, $offset + self::MULTI_INSERT_ROWS);
+            $count = $end - $offset;
+            $placeholders = implode(',', array_fill(0, $count, '(?, ?, ?, ?, ?, ?, ?, ?, ?)'));
+            $args = [];
+            for ($i = $offset; $i < $end; $i++) {
+                $args[] = $market;
+                $args[] = $symbol;
+                $args[] = $interval;
+                $args[] = $times[$i];
+                $args[] = $opens[$i];
+                $args[] = $highs[$i];
+                $args[] = $lows[$i];
+                $args[] = $closes[$i];
+                $args[] = $vols[$i];
+            }
+            $stmts[] = new Statement(
+                'INSERT OR REPLACE INTO candles (market, symbol, interval, open_time_ms, open, high, low, close, volume) VALUES ' . $placeholders,
+                $args,
+            );
+        }
+        $this->conn()->transaction($stmts);
+    }
+
+    /**
      * @param list<Candle> $candles
      */
     public function save(string $market, string $symbol, string $interval, array $candles): void
@@ -73,15 +215,21 @@ final class CandleStore
         if ($candles === []) {
             return;
         }
-        $stmts = [];
+        $times = [];
+        $opens = [];
+        $highs = [];
+        $lows = [];
+        $closes = [];
+        $vols = [];
         foreach ($candles as $c) {
-            $stmts[] = new Statement(
-                'INSERT OR REPLACE INTO candles (market, symbol, interval, open_time_ms, open, high, low, close, volume)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                [$market, $symbol, $interval, $c->openTimeMs, $c->open, $c->high, $c->low, $c->close, $c->volume]
-            );
+            $times[] = $c->openTimeMs;
+            $opens[] = $c->open;
+            $highs[] = $c->high;
+            $lows[] = $c->low;
+            $closes[] = $c->close;
+            $vols[] = $c->volume;
         }
-        $this->conn()->transaction($stmts);
+        $this->saveRawBatch($market, $symbol, $interval, $times, $opens, $highs, $lows, $closes, $vols);
     }
 
     public function close(): void

@@ -15,6 +15,8 @@ use ZipArchive;
  */
 final class MarketFeed
 {
+    private const STREAM_FLUSH_CHUNK = 4096;
+
     public const MARKETS = [
         'crypto' => [
             'label' => '加密市场 · Binance',
@@ -44,7 +46,7 @@ final class MarketFeed
     }
 
     /**
-     * Fetches up to 1000 recent candles online (Binance REST for crypto & XAUUSDz via PAXGUSDT spot gold proxy).
+     * Fetches up to 1000 recent candles online (or limit=2 for lightweight live stream updates).
      *
      * @return list<Candle>
      */
@@ -56,13 +58,13 @@ final class MarketFeed
             default => $symbol,
         };
         if ($symbol === 'USDJPYz') {
-            return self::syntheticDataset($market, $symbol, $interval, $limit);
+            return self::syntheticDataset($market, $symbol, $interval, max(2, $limit));
         }
         $url = sprintf(
             'https://api.binance.com/api/v3/klines?symbol=%s&interval=%s&limit=%d',
             rawurlencode($binanceSymbol),
             rawurlencode($interval),
-            min(1000, max(60, $limit))
+            min(1000, max(2, $limit))
         );
         [$body, $resp] = URLSession::shared()->data(for: new URLRequest($url));
         if ($resp->statusCode < 200 || $resp->statusCode >= 300) {
@@ -90,12 +92,144 @@ final class MarketFeed
     }
 
     /**
+     * Produces the next incremental candle update(s) for live streaming:
+     *  - Online mode: pulls the latest 2 klines from Binance REST (closed previous bar + live forming bar).
+     *  - Offline / Synthetic / 100K / 1M mode: evolves a deterministic micro-tick on the current bar and
+     *    rolls over into a new bar every 5 ticks so O(log N) LOD spine updates & live P&L work offline too.
+     *
+     * @return array{candles: list<Candle>, source: string}
+     */
+    public static function nextStreamTick(
+        string $market,
+        string $symbol,
+        string $interval,
+        ?Candle $last,
+        bool $preferOnline,
+        int $tickSeq,
+    ): array {
+        if ($preferOnline && $symbol !== 'USDJPYz') {
+            try {
+                $latest = self::fetchOnline($market, $symbol, $interval, 2);
+                if ($latest !== []) {
+                    return ['candles' => $latest, 'source' => 'Binance 实盘流'];
+                }
+            } catch (\Throwable) {
+                // Fall through cleanly to local micro-tick evolution when offline
+            }
+        }
+
+        [$base, $vol] = self::symbolProfile($symbol);
+        $stepMs = self::intervalMs($interval);
+        if ($last === null) {
+            $nowBucket = intdiv((int)(microtime(true) * 1000), $stepMs) * $stepMs;
+            $c = new Candle($nowBucket, $base, $base * 1.0005, $base * 0.9995, $base, 12.0);
+            return ['candles' => [$c], 'source' => '增量模拟流'];
+        }
+
+        $seed = (crc32("$market:$symbol:$interval:$tickSeq") & 0x7fffffff) + 101;
+        $u1 = ((($seed * 1103515245 + 12345) & 0x7fffffff) / 2147483647.0) * 2.0 - 1.0;
+        $drift = sin($tickSeq * 0.37) * ($vol * 0.12);
+        $deltaPct = $drift + $u1 * ($vol * 0.32);
+
+        $rollNewBar = ($tickSeq % 5) === 0;
+        if ($rollNewBar) {
+            $open = $last->close;
+            $close = max($base * 0.15, $open * (1.0 + $deltaPct));
+            $wick = abs($u1) * $vol * 0.25 * $open;
+            $high = max($open, $close) + $wick;
+            $low = max($base * 0.10, min($open, $close) - $wick * 0.8);
+            $next = new Candle(
+                $last->openTimeMs + $stepMs,
+                $open,
+                $high,
+                $low,
+                $close,
+                max(5.0, 35.0 + abs($u1) * 120.0),
+            );
+        } else {
+            $close = max($base * 0.15, $last->close * (1.0 + $deltaPct));
+            $high = max($last->high, $close);
+            $low = min($last->low, $close);
+            $next = new Candle(
+                $last->openTimeMs,
+                $last->open,
+                $high,
+                $low,
+                $close,
+                $last->volume + 8.0 + abs($u1) * 30.0,
+            );
+        }
+
+        return ['candles' => [$next], 'source' => '增量行情流'];
+    }
+
+    /**
+     * Streams an arbitrarily large Exness Tick ZIP/CSV or MT5 OHLC CSV in 4096-bar chunks
+     * directly into SQLite (`CandleStore`) AND resident C Columnar SoA memory (`DatasetHandle`),
+     * with no 5,000-bar cap and near-zero PHP heap overhead.
+     */
+    public static function importIntoStoreAndDataset(
+        string $filePath,
+        string $market,
+        string $symbol,
+        string $interval,
+        ?CandleStore $store = null,
+    ): DatasetHandle {
+        $ds = DatasetHandle::createEmpty(8192);
+        try {
+            self::withCsvOrZipStream(
+                $filePath,
+                function ($stream) use ($market, $symbol, $interval, $store, $ds): void {
+                    self::streamIntoSinks(
+                        $stream,
+                        self::intervalMs($interval),
+                        0,
+                        static function (array $t, array $o, array $h, array $l, array $c, array $v) use ($market, $symbol, $interval, $store, $ds): void {
+                            $store?->saveRawBatch($market, $symbol, $interval, $t, $o, $h, $l, $c, $v);
+                            $ds->appendBatch($t, $o, $h, $l, $c, $v);
+                        },
+                    );
+                },
+            );
+            return $ds->finalize();
+        } catch (\Throwable $e) {
+            $ds->release();
+            throw $e;
+        }
+    }
+
+    /**
      * Imports an Exness Tick CSV/ZIP (`Exness_XAUUSD_*.zip` with `"Exness","Symbol","Timestamp","Bid","Ask"`)
-     * or standard MT5 OHLC CSV, aggregating ticks into $interval OHLCV candles.
+     * or standard MT5 OHLC CSV, aggregating ticks into $interval OHLCV candles ($maxCandles = 0 => unlimited).
      *
      * @return list<Candle>
      */
-    public static function importCsvOrZip(string $filePath, string $interval): array
+    public static function importCsvOrZip(string $filePath, string $interval, int $maxCandles = 0): array
+    {
+        $candles = [];
+        self::withCsvOrZipStream(
+            $filePath,
+            function ($stream) use ($interval, $maxCandles, &$candles): void {
+                self::streamIntoSinks(
+                    $stream,
+                    self::intervalMs($interval),
+                    $maxCandles,
+                    static function (array $t, array $o, array $h, array $l, array $c, array $v) use (&$candles): void {
+                        $n = count($c);
+                        for ($i = 0; $i < $n; $i++) {
+                            $candles[] = new Candle($t[$i], $o[$i], $h[$i], $l[$i], $c[$i], $v[$i]);
+                        }
+                    },
+                );
+            },
+        );
+        return $candles;
+    }
+
+    /**
+     * @param callable(resource): void $consumer
+     */
+    private static function withCsvOrZipStream(string $filePath, callable $consumer): void
     {
         if (!is_file($filePath)) {
             throw new RuntimeException("File not found: $filePath");
@@ -111,17 +245,21 @@ final class MarketFeed
                 $zip->close();
                 throw new RuntimeException("Cannot read CSV stream inside ZIP");
             }
-            $candles = self::parseStream($stream, self::intervalMs($interval));
-            fclose($stream);
-            $zip->close();
-            return $candles;
+            try {
+                $consumer($stream);
+            } finally {
+                fclose($stream);
+                $zip->close();
+            }
+            return;
         }
+
         $fp = fopen($filePath, 'rb');
         if ($fp === false) {
             throw new RuntimeException("Cannot open CSV: $filePath");
         }
         try {
-            return self::parseStream($fp, self::intervalMs($interval));
+            $consumer($fp);
         } finally {
             fclose($fp);
         }
@@ -129,25 +267,61 @@ final class MarketFeed
 
     /**
      * @param resource $stream
-     * @return list<Candle>
+     * @param callable(list<int>, list<float>, list<float>, list<float>, list<float>, list<float>): void $onChunk
      */
-    private static function parseStream($stream, int $bucketMs): array
+    private static function streamIntoSinks($stream, int $bucketMs, int $maxCandles, callable $onChunk): void
     {
-        $headerLine = fgets($stream);
-        if ($headerLine === false) {
-            return [];
+        $firstLine = fgets($stream);
+        if ($firstLine === false) {
+            return;
         }
-        $isExnessTick = stripos($headerLine, 'Bid') !== false && stripos($headerLine, 'Ask') !== false;
-        $candles = [];
+        $isExnessTick = stripos($firstLine, 'Bid') !== false && stripos($firstLine, 'Ask') !== false;
+
+        $times = [];
+        $opens = [];
+        $highs = [];
+        $lows = [];
+        $closes = [];
+        $vols = [];
+        $emitted = 0;
+
+        $pushBar = static function (int $t, float $o, float $h, float $l, float $c, float $v) use (
+            &$times, &$opens, &$highs, &$lows, &$closes, &$vols, &$emitted, $onChunk
+        ): void {
+            $times[] = $t;
+            $opens[] = $o;
+            $highs[] = $h;
+            $lows[] = $l;
+            $closes[] = $c;
+            $vols[] = $v;
+            $emitted++;
+            if (count($closes) >= self::STREAM_FLUSH_CHUNK) {
+                $onChunk($times, $opens, $highs, $lows, $closes, $vols);
+                $times = $opens = $highs = $lows = $closes = $vols = [];
+            }
+        };
+
         $curBucket = -1;
         $o = $h = $l = $c = $v = 0.0;
 
-        while (($line = fgets($stream)) !== false) {
+        // If the first line is data (no textual header), parse it too
+        $pendingLine = (!$isExnessTick && preg_match('/^\s*\d/', $firstLine) === 1) ? $firstLine : null;
+
+        while (true) {
+            if ($pendingLine !== null) {
+                $line = $pendingLine;
+                $pendingLine = null;
+            } else {
+                $line = fgets($stream);
+                if ($line === false) {
+                    break;
+                }
+            }
             $line = trim($line);
             if ($line === '') {
                 continue;
             }
-            $cols = str_getcsv($line, str_contains($line, "\t") ? "\t" : ',');
+            $cols = str_getcsv($line, str_contains($line, "\t") ? "\t" : ',', '"', '');
             if ($isExnessTick && count($cols) >= 5) {
                 // "Exness","XAUUSD","2026-06-05 04:33:12.125Z",4439.650,4439.799
                 $ts = strtotime((string)$cols[2]);
@@ -158,7 +332,11 @@ final class MarketFeed
                 $bucket = intdiv($ts * 1000, $bucketMs) * $bucketMs;
                 if ($bucket !== $curBucket) {
                     if ($curBucket >= 0) {
-                        $candles[] = new Candle($curBucket, $o, $h, $l, $c, $v);
+                        $pushBar($curBucket, $o, $h, $l, $c, $v);
+                        if ($maxCandles > 0 && $emitted >= $maxCandles) {
+                            $curBucket = -1;
+                            break;
+                        }
                     }
                     $curBucket = $bucket;
                     $o = $h = $l = $c = $mid;
@@ -178,7 +356,7 @@ final class MarketFeed
                 if ($tsMs <= 0) {
                     continue;
                 }
-                $candles[] = new Candle(
+                $pushBar(
                     $tsMs,
                     (float)$cols[1],
                     (float)$cols[2],
@@ -186,15 +364,33 @@ final class MarketFeed
                     (float)$cols[4],
                     isset($cols[5]) ? (float)$cols[5] : 1.0,
                 );
-            }
-            if (count($candles) >= 5000) {
-                break;
+                if ($maxCandles > 0 && $emitted >= $maxCandles) {
+                    break;
+                }
             }
         }
-        if ($isExnessTick && $curBucket >= 0) {
-            $candles[] = new Candle($curBucket, $o, $h, $l, $c, $v);
+
+        if ($isExnessTick && $curBucket >= 0 && ($maxCandles <= 0 || $emitted < $maxCandles)) {
+            $pushBar($curBucket, $o, $h, $l, $c, $v);
         }
-        return $candles;
+        if ($closes !== []) {
+            $onChunk($times, $opens, $highs, $lows, $closes, $vols);
+        }
+    }
+
+    /**
+     * @return array{0: float, 1: float}
+     */
+    private static function symbolProfile(string $symbol): array
+    {
+        return match ($symbol) {
+            'XAUUSDz', 'PAXGUSDT' => [4380.0, 0.0028],
+            'EURUSDz' => [1.0850, 0.0012],
+            'USDJPYz' => [153.40, 0.0018],
+            'ETHUSDT' => [3420.0, 0.0085],
+            'SOLUSDT' => [195.0, 0.0115],
+            default => [92500.0, 0.0068],
+        };
     }
 
     /**
@@ -206,14 +402,7 @@ final class MarketFeed
      */
     public static function syntheticDataset(string $market, string $symbol, string $interval, int $count = 600): array
     {
-        [$base, $vol] = match ($symbol) {
-            'XAUUSDz', 'PAXGUSDT' => [4380.0, 0.0028],
-            'EURUSDz' => [1.0850, 0.0012],
-            'USDJPYz' => [153.40, 0.0018],
-            'ETHUSDT' => [3420.0, 0.0085],
-            'SOLUSDT' => [195.0, 0.0115],
-            default => [92500.0, 0.0068],
-        };
+        [$base, $vol] = self::symbolProfile($symbol);
         $stepMs = self::intervalMs($interval);
         $startMs = 1780617600_000 - $count * $stepMs; // anchored at 2026-06-05 UTC
 

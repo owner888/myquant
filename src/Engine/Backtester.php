@@ -3,51 +3,22 @@ declare(strict_types=1);
 
 namespace MyQuant\Engine;
 
-use MyQuant\Data\Candle;
+use MyQuant\Data\{Candle, DatasetHandle};
+use MyQuant\Native\QuantSweepFfi;
 
 final class Backtester
 {
     private const ATR_PERIOD = 14;
+    public const DIR_LONG = 1;
+    public const DIR_BOTH = 0;
+    public const DIR_SHORT = -1;
 
     /**
      * Event-driven, zero-lookahead EMA Trend + Wilder ATR(14) Trailing Hard-Stop
-     * backtester with Fixed-Fractional Risk Position Sizing (以损定量).
+     * backtester with Fixed-Fractional Risk Position Sizing (以损定量) and Long/Short/Both support.
+     * Kept 100% bit-aligned with `native/quant_sweep.c` (`mq_backtest_on_dataset`).
      *
      * @param list<Candle> $candles
-     * @return array{
-     *   initialEquity: float,
-     *   finalEquity: float,
-     *   netReturnPct: float,
-     *   buyHoldReturnPct: float,
-     *   maxDrawdownPct: float,
-     *   calmarRatio: float,
-     *   profitFactor: float,
-     *   winRatePct: float,
-     *   expectancyR: float,
-     *   closedTrades: int,
-     *   totalFeesQuote: float,
-     *   grossProfitQuote: float,
-     *   grossLossQuote: float,
-     *   xs: list<float>,
-     *   strategyYs: list<float>,
-     *   holdYs: list<float>,
-     *   drawdownYs: list<float>,
-     *   yMin: float,
-     *   yMax: float,
-     *   ddMin: float,
-     *   trades: list<array{
-     *     id: int,
-     *     entryTime: string,
-     *     exitTime: string,
-     *     entryPrice: float,
-     *     exitPrice: float,
-     *     stopPrice: float,
-     *     pnl: float,
-     *     rMultiple: float,
-     *     fee: float,
-     *     reason: string
-     *   }>
-     * }
      */
     public static function run(
         array $candles,
@@ -58,15 +29,19 @@ final class Backtester
         float $feeRate = 0.0008,
         float $initialEquity = 10000.0,
         float $maxLeverage = 1.0,
+        int $direction = self::DIR_LONG,
     ): array {
         $n = count($candles);
-        if ($n < 30 || $fastPeriod >= $slowPeriod) {
+        if ($n < 30 || $fastPeriod < 2 || $fastPeriod >= $slowPeriod || $initialEquity <= 0.0) {
             return self::emptyResult($initialEquity);
         }
 
-        // 1. Wilder ATR(14)
+        $dirMode = $direction > 0 ? 1 : ($direction < 0 ? -1 : 0);
+        $maxLev = max(0.1, $maxLeverage);
+
+        // 1. Wilder ATR(14) — exact parity with compute_atr_column() in quant_sweep.c
         $atr = [];
-        $tr0 = max($candles[0]->high - $candles[0]->low, $candles[0]->close * 0.001);
+        $tr0 = max($candles[0]->high - $candles[0]->low, abs($candles[0]->close) * 0.001, 1e-6);
         $atr[0] = $tr0;
         $trSum = $tr0;
         for ($i = 1; $i < $n; $i++) {
@@ -88,9 +63,9 @@ final class Backtester
         $emaS = $candles[0]->close;
         $prevBull = false;
 
-        $cash = $initialEquity;
+        $balance = $initialEquity;
+        $posDir = 0; // 0: flat, 1: long, -1: short
         $qty = 0.0;
-        $entryCost = 0.0;
         $entryPrice = 0.0;
         $entryTimeMs = 0;
         $entryFee = 0.0;
@@ -110,7 +85,7 @@ final class Backtester
         $eqSeries = [$initialEquity];
         $bhSeries = [$initialEquity];
         $ddSeries = [0.0];
-        $firstClose = max(1e-9, $candles[0]->close);
+        $firstClose = $candles[0]->close > 1e-9 ? $candles[0]->close : 1.0;
 
         for ($i = 1; $i < $n; $i++) {
             $c = $candles[$i];
@@ -118,20 +93,44 @@ final class Backtester
             $emaF = ($price - $emaF) * $kFast + $emaF;
             $emaS = ($price - $emaS) * $kSlow + $emaS;
             $bull = $emaF > $emaS;
+            $crossBull = !$prevBull && $bull;
+            $crossBear = $prevBull && !$bull;
 
-            if ($qty > 0.0) {
-                $candStop = $price - $atrMult * $atr[$i];
-                if ($candStop > $stopPrice) {
-                    $stopPrice = $candStop;
+            // 1. Manage / close existing position
+            if ($posDir !== 0) {
+                $hitStop = false;
+                $flipExit = false;
+                $rawExit = $price;
+
+                if ($posDir === 1) {
+                    $candStop = $price - $atrMult * $atr[$i];
+                    if ($candStop > $stopPrice) {
+                        $stopPrice = $candStop;
+                    }
+                    $hitStop = $c->low <= $stopPrice;
+                    $flipExit = $crossBear;
+                    if ($hitStop) {
+                        // Gap-down fill: cannot fill better than current bar high
+                        $rawExit = min($stopPrice, $c->high);
+                    }
+                } else {
+                    $candStop = $price + $atrMult * $atr[$i];
+                    if ($candStop < $stopPrice) {
+                        $stopPrice = $candStop;
+                    }
+                    $hitStop = $c->high >= $stopPrice;
+                    $flipExit = $crossBull;
+                    if ($hitStop) {
+                        // Gap-up fill: cannot fill better than current bar low
+                        $rawExit = max($stopPrice, $c->low);
+                    }
                 }
-                $hitStop = $c->low <= $stopPrice;
-                $flipBear = $prevBull && !$bull;
 
-                if ($hitStop || $flipBear) {
-                    $rawExit = $hitStop ? min($stopPrice, $c->high) : $price;
+                if ($hitStop || $flipExit) {
                     $exitFee = $qty * $rawExit * $feeRate;
-                    $proceeds = $qty * $rawExit - $exitFee;
-                    $pnl = $proceeds - $entryCost;
+                    $pnl = $posDir === 1
+                        ? ($qty * ($rawExit - $entryPrice) - $entryFee - $exitFee)
+                        : ($qty * ($entryPrice - $rawExit) - $entryFee - $exitFee);
                     $totalFee = $entryFee + $exitFee;
                     $totalFees += $exitFee;
                     $rMult = $riskDollars > 1e-6 ? ($pnl / $riskDollars) : 0.0;
@@ -146,8 +145,9 @@ final class Backtester
 
                     $trades[] = [
                         'id' => $nextId++,
-                        'entryTime' => gmdate('m-d H:i', intdiv($entryTimeMs, 1000)),
-                        'exitTime' => gmdate('m-d H:i', intdiv($c->openTimeMs, 1000)),
+                        'side' => $posDir === 1 ? '多' : '空',
+                        'entryTime' => gmdate('y-m-d H:i', intdiv($entryTimeMs, 1000)),
+                        'exitTime' => gmdate('y-m-d H:i', intdiv($c->openTimeMs, 1000)),
                         'entryPrice' => $entryPrice,
                         'exitPrice' => $rawExit,
                         'stopPrice' => $stopPrice,
@@ -157,35 +157,52 @@ final class Backtester
                         'reason' => $hitStop ? 'ATR 硬止损' : 'EMA 趋势反转',
                     ];
 
-                    $cash += $proceeds;
+                    $balance = max(0.0, $balance + $pnl);
+                    $posDir = 0;
                     $qty = 0.0;
-                    $entryCost = 0.0;
-                }
-            } elseif ($i >= $slowPeriod && !$prevBull && $bull && $cash > 0.0) {
-                $execEntry = $price * (1.0 + $feeRate);
-                $stopDist = max($atrMult * $atr[$i], $price * 0.002);
-                $riskBudget = $cash * $riskPct;
-                $desiredQty = $riskBudget / $stopDist;
-                $maxNotional = $cash * max(0.1, $maxLeverage);
-                $notional = $desiredQty * $execEntry;
-                if ($notional > $maxNotional) {
-                    $notional = $maxNotional;
-                    $desiredQty = $notional / $execEntry;
-                }
-                if ($desiredQty > 0.0 && $notional > 1.0) {
-                    $qty = $desiredQty;
-                    $entryCost = $notional;
-                    $entryPrice = $price;
-                    $entryTimeMs = $c->openTimeMs;
-                    $entryFee = $desiredQty * $price * $feeRate;
-                    $totalFees += $entryFee;
-                    $riskDollars = max(1.0, $desiredQty * $stopDist);
-                    $cash -= $notional;
-                    $stopPrice = $price - $stopDist;
                 }
             }
 
-            $eq = $cash + ($qty > 0.0 ? $qty * $price * (1.0 - $feeRate) : 0.0);
+            // 2. Open new position (or immediate reversal in DIR_BOTH mode)
+            if ($posDir === 0 && $i >= $slowPeriod && $balance > 0.0) {
+                $wantDir = 0;
+                if ($crossBull && $dirMode >= 0) {
+                    $wantDir = 1;
+                } elseif ($crossBear && $dirMode <= 0) {
+                    $wantDir = -1;
+                }
+
+                if ($wantDir !== 0) {
+                    $execEntry = $price * (1.0 + $feeRate);
+                    $stopDist = max($atrMult * $atr[$i], $price * 0.002);
+                    $desiredQty = ($balance * $riskPct) / $stopDist;
+                    $maxNotional = $balance * $maxLev;
+                    $notional = $desiredQty * $execEntry;
+                    if ($notional > $maxNotional) {
+                        $notional = $maxNotional;
+                        $desiredQty = $notional / $execEntry;
+                    }
+                    if ($desiredQty > 0.0 && $notional > 1.0) {
+                        $posDir = $wantDir;
+                        $qty = $desiredQty;
+                        $entryPrice = $price;
+                        $entryTimeMs = $c->openTimeMs;
+                        $entryFee = $desiredQty * $price * $feeRate;
+                        $totalFees += $entryFee;
+                        $riskDollars = max(1.0, $desiredQty * $stopDist);
+                        $stopPrice = $wantDir === 1 ? ($price - $stopDist) : ($price + $stopDist);
+                    }
+                }
+            }
+
+            $eq = match ($posDir) {
+                1 => $balance + $qty * ($price - $entryPrice) - $entryFee - $qty * $price * $feeRate,
+                -1 => $balance + $qty * ($entryPrice - $price) - $entryFee - $qty * $price * $feeRate,
+                default => $balance,
+            };
+            if ($eq < 0.0) {
+                $eq = 0.0;
+            }
             if ($eq > $peakEq) {
                 $peakEq = $eq;
             }
@@ -209,8 +226,10 @@ final class Backtester
         $expR = $closed > 0 ? ($rSum / $closed) : 0.0;
         $calmar = $maxDd > 0.05 ? ($netRet / $maxDd) : ($netRet > 0.0 ? 9.9 : 0.0);
 
-        // Downsample series to <= 240 points for crisp GPU rendering
-        $stride = max(1, intdiv(count($eqSeries), 240));
+        // Downsample series to <= 280 points for crisp GPU rendering
+        $maxCurve = 280;
+        $len = count($eqSeries);
+        $stride = max(1, intdiv($len - 1, $maxCurve - 1));
         $xs = [];
         $sYs = [];
         $hYs = [];
@@ -219,7 +238,10 @@ final class Backtester
         $yMax = $initialEquity;
         $ddMin = -1.0;
 
-        for ($i = 0, $len = count($eqSeries); $i < $len; $i += $stride) {
+        for ($i = 0; $i < $len && count($xs) < $maxCurve; $i++) {
+            if ($i !== 0 && ($i % $stride !== 0) && $i !== $len - 1) {
+                continue;
+            }
             $xs[] = (float)$i;
             $sv = $eqSeries[$i];
             $hv = $bhSeries[$i];
@@ -256,7 +278,7 @@ final class Backtester
             'yMin' => max(0.0, $yMin - $pad),
             'yMax' => $yMax + $pad,
             'ddMin' => min(-2.0, $ddMin * 1.15),
-            'trades' => array_reverse($trades),
+            'trades' => array_slice(array_reverse($trades), 0, 40),
         ];
     }
 
@@ -288,10 +310,10 @@ final class Backtester
     }
 
     /**
-     * Zero-copy backtest directly over a C Columnar SoA DatasetHandle (~6 ms for 1,000,000 bars).
+     * Zero-copy backtest directly over a C Columnar SoA DatasetHandle (~3 ms for 1,000,000 bars).
      */
     public static function runOnDataset(
-        \MyQuant\Data\DatasetHandle $ds,
+        DatasetHandle $ds,
         int $fastPeriod = 12,
         int $slowPeriod = 36,
         float $atrMult = 2.0,
@@ -299,19 +321,20 @@ final class Backtester
         float $feeRate = 0.0008,
         float $initialEquity = 10000.0,
         float $maxLeverage = 1.0,
+        int $direction = self::DIR_LONG,
     ): array {
-        if ($ds->id <= 0 || !\MyQuant\Native\QuantSweepFfi::available()) {
+        if ($ds->id <= 0 || !QuantSweepFfi::available()) {
             $t0 = hrtime(true);
-            $res = self::run($ds->fallbackCandles, $fastPeriod, $slowPeriod, $atrMult, $riskPct, $feeRate, $initialEquity, $maxLeverage);
+            $res = self::run($ds->fallbackCandles, $fastPeriod, $slowPeriod, $atrMult, $riskPct, $feeRate, $initialEquity, $maxLeverage, $direction);
             $res['elapsedMs'] = (hrtime(true) - $t0) / 1e6;
             return $res;
         }
-        if ($ds->count < 30 || $fastPeriod >= $slowPeriod) {
+        if ($ds->count < 30 || $fastPeriod < 2 || $fastPeriod >= $slowPeriod) {
             return self::emptyResult($initialEquity) + ['elapsedMs' => 0.0];
         }
 
         $t0 = hrtime(true);
-        $ffi = \MyQuant\Native\QuantSweepFfi::ffi();
+        $ffi = QuantSweepFfi::ffi();
         $maxCurve = 280;
         $maxTrades = 40;
         $summary = $ffi->new('double[14]');
@@ -319,9 +342,9 @@ final class Backtester
         $sYs = $ffi->new("double[$maxCurve]");
         $hYs = $ffi->new("double[$maxCurve]");
         $dYs = $ffi->new("double[$maxCurve]");
-        $trBuf = $ffi->new('double[' . ($maxTrades * \MyQuant\Native\QuantSweepFfi::MQ_TRADE_STRIDE) . ']');
+        $trBuf = $ffi->new('double[' . ($maxTrades * QuantSweepFfi::MQ_TRADE_STRIDE) . ']');
 
-        $curveLen = \MyQuant\Native\QuantSweepFfi::mq_backtest_on_dataset(
+        $curveLen = QuantSweepFfi::mq_backtest_on_dataset(
             $ds->id,
             $fastPeriod,
             $slowPeriod,
@@ -330,6 +353,7 @@ final class Backtester
             $feeRate,
             $riskPct,
             $maxLeverage,
+            $direction,
             \FFI::addr($summary[0]),
             \FFI::addr($xs[0]),
             \FFI::addr($sYs[0]),
@@ -372,9 +396,11 @@ final class Backtester
         $exportedTrades = (int)round($summary[13]);
         $trades = [];
         for ($k = 0; $k < $exportedTrades; $k++) {
-            $b = $k * \MyQuant\Native\QuantSweepFfi::MQ_TRADE_STRIDE;
+            $b = $k * QuantSweepFfi::MQ_TRADE_STRIDE;
+            $reasonCode = (int)round($trBuf[$b + 7]);
             $trades[] = [
                 'id' => (int)round($trBuf[$b]),
+                'side' => $reasonCode >= 0 ? '多' : '空',
                 'entryTime' => gmdate('y-m-d H:i', intdiv((int)$trBuf[$b + 1], 1000)),
                 'exitTime' => gmdate('y-m-d H:i', intdiv((int)$trBuf[$b + 2], 1000)),
                 'entryPrice' => (float)$trBuf[$b + 3],
@@ -383,7 +409,7 @@ final class Backtester
                 'pnl' => (float)$trBuf[$b + 5],
                 'rMultiple' => (float)$trBuf[$b + 6],
                 'fee' => 0.0,
-                'reason' => $trBuf[$b + 7] > 0.5 ? 'ATR 硬止损' : 'EMA 趋势反转',
+                'reason' => abs($reasonCode) === 1 ? 'ATR 硬止损' : 'EMA 趋势反转',
             ];
         }
 

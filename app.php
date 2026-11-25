@@ -9,8 +9,12 @@ require __DIR__ . '/boot.php';
 
 App::setName('MyQuant');
 $state = new QuantState();
+App::onOpenFile(static fn(string $path) => $state->importLocalFile($path));
 if (($initScale = getenv('MYQUANT_SCALE')) && is_string($initScale)) {
     $state->selectScaleMode($initScale);
+}
+if (($initDir = getenv('MYQUANT_DIR')) && is_string($initDir)) {
+    $state->selectDirection($initDir);
 }
 if (($initTab = getenv('MYQUANT_TAB')) && is_string($initTab)) {
     $state->tab = $initTab;
@@ -24,8 +28,8 @@ App::whenReady(function () use ($state): void {
         title: 'MyQuant',
         width: $w,
         height: $h,
-        minWidth: 920,
-        minHeight: 620,
+        minWidth: $desktop ? 920 : 320,
+        minHeight: $desktop ? 620 : 480,
         titleBarStyle: $macDesktop ? 'hiddenInset' : 'default',
         vibrancy: $desktop ? 'sidebar' : '', // macOS NSVisualEffect sidebar + Windows 11 Mica sidebar
         stateKey: 'main',

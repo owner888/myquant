@@ -11,6 +11,7 @@ use MyQuant\Native\QuantSweepFfi;
  * Multi-threaded Cross-Platform Parameter Grid Sweep Runner:
  *  - Operates directly on resident C Columnar SoA `DatasetHandle` (`mq_sweep_on_dataset`)
  *    across all CPU cores (`pthread` on macOS/Linux/Android, `_beginthreadex` on Windows).
+ *  - Supports Long (`1`), Short (`-1`), and Both (`0`) trend directions.
  *  - Evaluates 3D neighborhood stability ("参数高原 vs 孤岛过拟合检测") for every combination.
  */
 final class SweepRunner
@@ -27,9 +28,10 @@ final class SweepRunner
         float $feeRate = 0.0008,
         float $riskPct = 0.01,
         float $maxLeverage = 1.0,
+        int $direction = Backtester::DIR_LONG,
     ): array {
         if ($ds->id <= 0 || !QuantSweepFfi::available()) {
-            return self::sweep($ds->fallbackCandles, $fastList, $slowList, $atrMults, $initialEquity, $feeRate, $riskPct, $maxLeverage);
+            return self::sweepPhp($ds->fallbackCandles, $fastList, $slowList, $atrMults, $initialEquity, $feeRate, $riskPct, $maxLeverage, $direction);
         }
 
         $t0 = hrtime(true);
@@ -61,6 +63,7 @@ final class SweepRunner
             $feeRate,
             $riskPct,
             $maxLeverage,
+            $direction,
             0, // auto-detect all CPU cores
             FFI::addr($outBuf[0]),
             $maxCombos,
@@ -107,37 +110,55 @@ final class SweepRunner
         float $feeRate = 0.0008,
         float $riskPct = 0.01,
         float $maxLeverage = 1.0,
+        int $direction = Backtester::DIR_LONG,
     ): array {
         $ds = DatasetHandle::fromCandles($candles);
         try {
             if ($ds->id > 0) {
-                return self::sweepOnDataset($ds, $fastList, $slowList, $atrMults, $initialEquity, $feeRate, $riskPct, $maxLeverage);
+                return self::sweepOnDataset($ds, $fastList, $slowList, $atrMults, $initialEquity, $feeRate, $riskPct, $maxLeverage, $direction);
             }
-            $t0 = hrtime(true);
-            $rawCells = [];
-            foreach ($fastList as $f) {
-                foreach ($slowList as $s) {
-                    if ($s <= $f) { continue; }
-                    foreach ($atrMults as $a) {
-                        $bt = Backtester::run($candles, $f, $s, $a, $riskPct, $feeRate, $initialEquity, $maxLeverage);
-                        $key = "$f:$s:" . round($a, 2);
-                        $rawCells[$key] = [
-                            'fast' => $f,
-                            'slow' => $s,
-                            'atrMult' => round($a, 2),
-                            'netReturnPct' => $bt['netReturnPct'],
-                            'maxDrawdownPct' => $bt['maxDrawdownPct'],
-                            'profitFactor' => $bt['profitFactor'],
-                            'winRatePct' => $bt['winRatePct'],
-                            'trades' => $bt['closedTrades'],
-                        ];
-                    }
-                }
-            }
-            return self::rankNeighbors($rawCells, $fastList, $slowList, $atrMults, false, 'PHP Fallback', (hrtime(true) - $t0) / 1e6);
+            return self::sweepPhp($candles, $fastList, $slowList, $atrMults, $initialEquity, $feeRate, $riskPct, $maxLeverage, $direction);
         } finally {
             $ds->release();
         }
+    }
+
+    /**
+     * @param list<Candle> $candles
+     */
+    private static function sweepPhp(
+        array $candles,
+        array $fastList,
+        array $slowList,
+        array $atrMults,
+        float $initialEquity,
+        float $feeRate,
+        float $riskPct,
+        float $maxLeverage,
+        int $direction,
+    ): array {
+        $t0 = hrtime(true);
+        $rawCells = [];
+        foreach ($fastList as $f) {
+            foreach ($slowList as $s) {
+                if ($s <= $f) { continue; }
+                foreach ($atrMults as $a) {
+                    $bt = Backtester::run($candles, $f, $s, $a, $riskPct, $feeRate, $initialEquity, $maxLeverage, $direction);
+                    $key = "$f:$s:" . round($a, 2);
+                    $rawCells[$key] = [
+                        'fast' => $f,
+                        'slow' => $s,
+                        'atrMult' => round($a, 2),
+                        'netReturnPct' => $bt['netReturnPct'],
+                        'maxDrawdownPct' => $bt['maxDrawdownPct'],
+                        'profitFactor' => $bt['profitFactor'],
+                        'winRatePct' => $bt['winRatePct'],
+                        'trades' => $bt['closedTrades'],
+                    ];
+                }
+            }
+        }
+        return self::rankNeighbors($rawCells, $fastList, $slowList, $atrMults, false, 'PHP Fallback', (hrtime(true) - $t0) / 1e6);
     }
 
     private static function rankNeighbors(

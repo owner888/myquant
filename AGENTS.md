@@ -33,9 +33,11 @@ native/quant_sweep.c (g_datasets[64] 常驻 C 侧列式数组 + Wilder ATR(14) �
 > **注意**：`src/Native/QuantSweepFfi.php` 由 `./vendor/bin/myphp generate .` 根据 `myphp.json` 中的 `ffigen` 配置自动生成，**请勿手动编辑该文件**。
 
 ### 2.1 版本与常量
-- `MQ_SWEEP_VERSION = 2`
-- `MQ_ATR_PERIOD = 14`（数据集分配或更新最后一根 K 线时，C 侧自动预计算整列 Wilder ATR(14)，供回测与多线程扫描共享只读复用）
-- `MQ_MAX_DATASETS = 64`（静态表槽位，`ds_id` 为 `slot_index + 1`）
+- `MQ_SWEEP_VERSION = 3`
+- `MQ_ATR_PERIOD = 14`（数据集分配、流式 `finalize` 或更新最后一根 K 线时，C 侧自动计算 Wilder ATR(14)，供回测与多线程扫描共享只读复用）
+- `MQ_MAX_DATASETS = 64`（静态表槽位，`ds_id` 为 `slot_index + 1`，支持 `realloc` 动态扩容）
+- 方向常量：`MQ_DIR_LONG = 1`（仅做多）、`MQ_DIR_BOTH = 0`（多空双向反转）、`MQ_DIR_SHORT = -1`（仅做空）
+- 流式导入与增量接口：`mq_dataset_create_empty` → `mq_dataset_append_batch` → `mq_dataset_finalize`（配合 `CandleStore::saveRawBatch` / `loadDataset` 分批读写 SQLite），以及 `mq_dataset_get_last` / `mq_dataset_update_last`（`O(log N)` 右脊实时流更新）
 
 ### 2.2 二叉 OHLC LOD 金字塔（`mq_dataset_query_lod`）
 - 第 `0` 层（`shift = 2`）每桶聚合 `4` 根原始 K 线，之后每层二合一（`shift = lv + 2`），最多 `20` 层。
@@ -70,7 +72,7 @@ native/quant_sweep.c (g_datasets[64] 常驻 C 侧列式数组 + Wilder ATR(14) �
   | `+4` | 平仓价 `exit_price` |
   | `+5` | 净盈亏 `pnl`（已扣手续费） |
   | `+6` | 实现风险倍数 `r_multiple` |
-  | `+7` | 平仓原因标志（`1.0` = `ATR 硬止损`，`0.0` = `EMA 趋势反转`） |
+  | `+7` | 方向与平仓原因编码（`+1` = 多单 ATR 硬止损，`+2` = 多单 EMA 趋势反转，`-1` = 空单 ATR 硬止损，`-2` = 空单 EMA 趋势反转） |
 
 ### 2.4 多核网格扫描输出布局（`mq_sweep_on_dataset`）
 - 线程池策略：当 `n_candles >= 2000` 且组合数 `>= 4` 时自动启用多线程（主线程兼任最后一个分片 worker，避免空转等待），各线程写入各自独立的 `out_metrics[t * 8]` 区间，全程无锁。

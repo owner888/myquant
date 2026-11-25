@@ -3,5 +3,9 @@
 /.myphp/
 /vendor/
 *.local.php
+*.pdb
+*.lib
+*.exp
+scripts/deploy_*.sh
 .DS_Store
 /.agents/skills/myphp-app/

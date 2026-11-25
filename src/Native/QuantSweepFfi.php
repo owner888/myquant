@@ -9,11 +9,14 @@ use FFI\CData;
 
 final class QuantSweepFfi
 {
-    public const MQ_SWEEP_VERSION = 2;
+    public const MQ_SWEEP_VERSION = 3;
     public const MQ_METRICS_STRIDE = 8;
     public const MQ_BACKTEST_SUMMARY_LEN = 14;
     public const MQ_TRADE_STRIDE = 8;
     public const MQ_ATR_PERIOD = 14;
+    public const MQ_DIR_LONG = 1;
+    public const MQ_DIR_BOTH = 0;
+    public const MQ_DIR_SHORT = -1;
 
     public const LIBRARY = 'quant_sweep';
 
@@ -28,6 +31,18 @@ final class QuantSweepFfi
  const double *volumes,
  int n_candles
 );
+ int mq_dataset_create_empty(int initial_cap);
+ int mq_dataset_append_batch(
+ int ds_id,
+ const int64_t *open_time_ms,
+ const double *opens,
+ const double *highs,
+ const double *lows,
+ const double *closes,
+ const double *volumes,
+ int n_candles
+);
+ int mq_dataset_finalize(int ds_id);
  int mq_dataset_generate_mock(
  int n_candles,
  double base_price,
@@ -39,6 +54,11 @@ final class QuantSweepFfi
  void mq_dataset_free(int ds_id);
  int mq_dataset_count(int ds_id);
  int64_t mq_dataset_memory_bytes(int ds_id);
+ int mq_dataset_get_last(
+ int ds_id,
+ int64_t *out_open_time_ms,
+ double *out_ohlcv
+);
  int mq_dataset_update_last(
  int ds_id,
  int64_t open_time_ms,
@@ -68,6 +88,7 @@ final class QuantSweepFfi
  double fee_rate,
  double risk_pct,
  double max_leverage,
+ int direction,
  double *out_summary,
  double *out_xs,
  double *out_strategy_ys,
@@ -89,6 +110,7 @@ final class QuantSweepFfi
  double fee_rate,
  double risk_pct,
  double max_leverage,
+ int direction,
  int n_threads,
  double *out_metrics,
  int max_combos
@@ -222,6 +244,29 @@ final class QuantSweepFfi
         return self::ffi()->mq_dataset_alloc($open_time_ms, $opens, $highs, $lows, $closes, $volumes, $n_candles);
     }
 
+    public static function mq_dataset_create_empty(int $initial_cap): int
+    {
+        return self::ffi()->mq_dataset_create_empty($initial_cap);
+    }
+
+    /**
+     * @param CData|null $open_time_ms
+     * @param CData|null $opens
+     * @param CData|null $highs
+     * @param CData|null $lows
+     * @param CData|null $closes
+     * @param CData|null $volumes
+     */
+    public static function mq_dataset_append_batch(int $ds_id, mixed $open_time_ms, mixed $opens, mixed $highs, mixed $lows, mixed $closes, mixed $volumes, int $n_candles): int
+    {
+        return self::ffi()->mq_dataset_append_batch($ds_id, $open_time_ms, $opens, $highs, $lows, $closes, $volumes, $n_candles);
+    }
+
+    public static function mq_dataset_finalize(int $ds_id): int
+    {
+        return self::ffi()->mq_dataset_finalize($ds_id);
+    }
+
     public static function mq_dataset_generate_mock(int $n_candles, float $base_price, float $bar_volatility, int $start_time_ms, int $step_ms, int $seed): int
     {
         return self::ffi()->mq_dataset_generate_mock($n_candles, $base_price, $bar_volatility, $start_time_ms, $step_ms, $seed);
@@ -240,6 +285,15 @@ final class QuantSweepFfi
     public static function mq_dataset_memory_bytes(int $ds_id): int
     {
         return self::ffi()->mq_dataset_memory_bytes($ds_id);
+    }
+
+    /**
+     * @param CData|null $out_open_time_ms
+     * @param CData|null $out_ohlcv
+     */
+    public static function mq_dataset_get_last(int $ds_id, mixed $out_open_time_ms, mixed $out_ohlcv): int
+    {
+        return self::ffi()->mq_dataset_get_last($ds_id, $out_open_time_ms, $out_ohlcv);
     }
 
     public static function mq_dataset_update_last(int $ds_id, int $open_time_ms, float $open, float $high, float $low, float $close, float $volume): int
@@ -267,9 +321,9 @@ final class QuantSweepFfi
      * @param CData|null $out_drawdown_ys
      * @param CData|null $out_trades
      */
-    public static function mq_backtest_on_dataset(int $ds_id, int $fast_period, int $slow_period, float $atr_mult, float $initial_equity, float $fee_rate, float $risk_pct, float $max_leverage, mixed $out_summary, mixed $out_xs, mixed $out_strategy_ys, mixed $out_hold_ys, mixed $out_drawdown_ys, int $max_curve_pts, mixed $out_trades, int $max_trades): int
+    public static function mq_backtest_on_dataset(int $ds_id, int $fast_period, int $slow_period, float $atr_mult, float $initial_equity, float $fee_rate, float $risk_pct, float $max_leverage, int $direction, mixed $out_summary, mixed $out_xs, mixed $out_strategy_ys, mixed $out_hold_ys, mixed $out_drawdown_ys, int $max_curve_pts, mixed $out_trades, int $max_trades): int
     {
-        return self::ffi()->mq_backtest_on_dataset($ds_id, $fast_period, $slow_period, $atr_mult, $initial_equity, $fee_rate, $risk_pct, $max_leverage, $out_summary, $out_xs, $out_strategy_ys, $out_hold_ys, $out_drawdown_ys, $max_curve_pts, $out_trades, $max_trades);
+        return self::ffi()->mq_backtest_on_dataset($ds_id, $fast_period, $slow_period, $atr_mult, $initial_equity, $fee_rate, $risk_pct, $max_leverage, $direction, $out_summary, $out_xs, $out_strategy_ys, $out_hold_ys, $out_drawdown_ys, $max_curve_pts, $out_trades, $max_trades);
     }
 
     /**
@@ -278,9 +332,9 @@ final class QuantSweepFfi
      * @param CData|null $atr_mults
      * @param CData|null $out_metrics
      */
-    public static function mq_sweep_on_dataset(int $ds_id, mixed $fast_list, int $n_fast, mixed $slow_list, int $n_slow, mixed $atr_mults, int $n_atr, float $initial_equity, float $fee_rate, float $risk_pct, float $max_leverage, int $n_threads, mixed $out_metrics, int $max_combos): int
+    public static function mq_sweep_on_dataset(int $ds_id, mixed $fast_list, int $n_fast, mixed $slow_list, int $n_slow, mixed $atr_mults, int $n_atr, float $initial_equity, float $fee_rate, float $risk_pct, float $max_leverage, int $direction, int $n_threads, mixed $out_metrics, int $max_combos): int
     {
-        return self::ffi()->mq_sweep_on_dataset($ds_id, $fast_list, $n_fast, $slow_list, $n_slow, $atr_mults, $n_atr, $initial_equity, $fee_rate, $risk_pct, $max_leverage, $n_threads, $out_metrics, $max_combos);
+        return self::ffi()->mq_sweep_on_dataset($ds_id, $fast_list, $n_fast, $slow_list, $n_slow, $atr_mults, $n_atr, $initial_equity, $fee_rate, $risk_pct, $max_leverage, $direction, $n_threads, $out_metrics, $max_combos);
     }
 
     /**
